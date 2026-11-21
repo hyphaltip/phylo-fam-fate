@@ -271,6 +271,16 @@ async function loadExample(file, label) {
     status(`Could not load example: ${e.message}`, 'error');
   }
 }
+$('load-example-met12').addEventListener('click', async () => {
+  await loadExample('MET12_P46151.fa', 'example query: yeast MET12 (UniProt P46151)');
+  if (!state.records.length) return;
+  // A single query is meant for searching, so open step 2 ready to go
+  $('search-enable').checked = true;
+  $('search-options').classList.remove('hidden');
+  $('search-tool').value = 'blastp';
+  status('Loaded MET12 (P46151). Next: step 2 → Run search against Swiss-Prot, select hits, then “Use selected for alignment”.', 'success');
+  $('step-search').scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
 $('load-example-aa').addEventListener('click', () => loadExample('proteins.fa', 'example proteins (unaligned)'));
 $('load-example-nt').addEventListener('click', () => loadExample('nucleotide_aligned.fa', 'example nucleotide alignment'));
 
