@@ -21,12 +21,14 @@ phmmer -h | grep -m1 HMMER
 kalign --version 2>&1 | head -n1 || true
 muscle -version 2>&1 | head -n1
 FastTree -expert 2>&1 | head -n1
+FastTree-browser -expert 2>&1 | head -n1
 node --version
 famfate.sh --version
 
 section "1. family → kalign → trim → FastTree (offline)"
 famfate.sh --family "$EX/proteins.fa" --no-annotate -o t1 -T 2 >/dev/null 2>t1.err || { cat t1.err; bad "pipeline ran"; }
 check "aligned FASTA written"   test -s t1/family.aln.fa
+check "browser FastTree used"   grep -q '"tool":"FastTree-browser"' t1/run.json
 check "tree has 16 tips"        test "$(tips t1/family.nwk)" -eq 16
 check "rooted tree + SVG"       test -s t1/family.rooted.nwk -a -s t1/family.svg
 check "run.json records steps"  grep -q '"step":"tree"' t1/run.json
@@ -36,24 +38,32 @@ famfate.sh --family "$EX/proteins.fa" --aligner muscle --gap none --model wag --
 check "MUSCLE alignment"        test -s t2/family.aln.fa
 check "tree has 16 tips"        test "$(tips t2/family.nwk)" -eq 16
 
-section "3. FastTree parity: native vs the browser's WASM build"
+section "2b. double-precision FastTree option"
+famfate.sh --family "$EX/proteins.fa" --fasttree double --no-annotate -o t2b -T 2 >/dev/null 2>t2b.err || { cat t2b.err; bad "pipeline ran"; }
+check "bioconda FastTree used"  grep -qE '"tool":"FastTree(MP)?"' t2b/run.json
+
+section "3. FastTree parity: FastTree-browser (native) vs the website's WASM build"
+# FastTree-browser is compiled like the WASM build (single precision, strict FP),
+# so its Newick must be byte-identical. Bioconda's double-precision FastTree is
+# compared too, for information only: it legitimately differs on short branches.
 parity() {   # parity NAME ALN ARGS…
   local name=$1 aln=$2; shift 2
-  FastTree "$@" "$aln" > "$name.native.nwk" 2>/dev/null
+  FastTree-browser "$@" "$aln" > "$name.native.nwk" 2>/dev/null
   famfate-js fasttree-wasm "$aln" "$@" > "$name.wasm.nwk"
-  if cmp -s "$name.native.nwk" "$name.wasm.nwk"; then ok "$name: identical Newick"; return; fi
-  # Not byte-identical (floating-point build flags can differ): require the same
-  # topology and branch lengths within 1e-3.
-  if famfate-js compare-trees "$name.native.nwk" "$name.wasm.nwk" --tol 1e-3 > "$name.cmp.json"; then
-    ok "$name: same topology, lengths within 1e-3 ($(grep maxLengthDiff "$name.cmp.json" | tr -d ' ,'))"
-  else
-    bad "$name: trees differ"; cat "$name.cmp.json"
-  fi
+  check "$name [$*]: identical Newick" cmp -s "$name.native.nwk" "$name.wasm.nwk"
+  FastTree "$@" "$aln" > "$name.double.nwk" 2>/dev/null
+  if famfate-js compare-trees "$name.double.nwk" "$name.wasm.nwk" > "$name.double.json"; then d="same tree"; else d="differs"; fi
+  printf '       info: bioconda double precision vs browser: %s (%s)\n' "$d" \
+    "$(grep -E 'sameTopology|maxLengthDiff' "$name.double.json" | tr -d ' \n')"
 }
-parity nt_default "$EX/nucleotide_aligned.fa" -nt
+parity nt_jc "$EX/nucleotide_aligned.fa" -nt
 parity nt_gtr_gamma "$EX/nucleotide_aligned.fa" -nt -gtr -gamma
-parity aa_default t1/family.aln.fa
-parity aa_lg_gamma t1/family.aln.fa -lg -gamma
+parity aa_jtt t1/family.trim.fa
+parity aa_lg_gamma t1/family.trim.fa -lg -gamma
+parity aa_wag t1/family.trim.fa -wag
+# The pipeline itself (default --fasttree browser) must reproduce the website's tree
+famfate-js fasttree-wasm t1/family.trim.fa -lg -gamma > t1.wasm.nwk
+check "famfate.sh tree == website tree" cmp -s t1/family.nwk t1.wasm.nwk
 
 section "4. MET12 vs two small proteomes (BLAST, full-length hits, annotation, MAD)"
 # S. cerevisiae (UP000002311) + E. coli K-12 (UP000000625): small, quick to index

@@ -44,6 +44,9 @@ Align / trim / tree:
   -c, --cons X             trim columns with majority-residue fraction < X     [0]
   -m, --model jtt|lg|wag|nt|gtr   FastTree model (nt/gtr for nucleotides)      [lg]
       --no-gamma           omit -gamma (on by default)
+      --fasttree browser|double  FastTree build: 'browser' = single precision, byte-identical
+                           to the website (FastTree-browser); 'double' = bioconda's
+                           double-precision FastTree/FastTreeMP (multithreaded)  [browser]
       --fasttree-args "…"  extra FastTree arguments
 
 Post-processing:
@@ -65,7 +68,7 @@ EOF
 ORIG_ARGS=("$@")
 QUERY= QFASTA= FAMILY= ALIGNED= PROTEOMES= EXTRA_DB= SPROT=1
 TOOL=blastp EVALUE=1e-3 HIT_EVALUE=1e-5 MAXHITS=50 HSP_ONLY=0 ADD_QUERY=1
-ALIGNER=kalign GAP=0.5 CONS=0 MODEL=lg GAMMA=1 FT_EXTRA=
+ALIGNER=kalign GAP=0.5 CONS=0 MODEL=lg GAMMA=1 FT_EXTRA= FT_BUILD=browser
 ROOT=midpoint RANK=phylum ANNOTATE=1 DOMAINS=1
 OUTDIR=famfate_out DBDIR=${FAMFATE_DB:-famfate_db} THREADS=$(nproc 2>/dev/null || echo 2)
 
@@ -90,6 +93,7 @@ while [ $# -gt 0 ]; do
     -m|--model) MODEL=$2; shift ;;
     --no-gamma) GAMMA=0 ;;
     --fasttree-args) FT_EXTRA=$2; shift ;;
+    --fasttree) FT_BUILD=$2; shift ;;
     -r|--root) ROOT=$2; shift ;;
     --rank) RANK=$2; shift ;;
     --no-annotate) ANNOTATE=0 ;;
@@ -258,8 +262,15 @@ else
 fi
 
 # ---------------------------------------------------------------- 5. tree
-FT=FastTree; [ "$THREADS" -gt 1 ] && command -v FastTreeMP >/dev/null && FT=FastTreeMP
-need "$FT"
+case $FT_BUILD in
+  browser)
+    FT=FastTree-browser
+    command -v "$FT" >/dev/null || die "FastTree-browser not found: run cli/build-fasttree-browser.sh, or use --fasttree double" ;;
+  double)
+    FT=FastTree; [ "$THREADS" -gt 1 ] && command -v FastTreeMP >/dev/null && FT=FastTreeMP
+    need "$FT" ;;
+  *) die "--fasttree must be 'browser' or 'double'" ;;
+esac
 ftargs=()
 case $MODEL in
   nt)  ftargs=(-nt) ;;
@@ -275,7 +286,7 @@ if [ "$TYPE" = nt ] && [[ ! " ${ftargs[*]} " =~ " -nt " ]]; then ftargs=(-nt); s
 [ -n "$FT_EXTRA" ] && ftargs+=($FT_EXTRA)
 t0=$SECONDS
 OMP_NUM_THREADS=$THREADS "$FT" "${ftargs[@]}" family.trim.fa > family.nwk 2>>"$LOG" || die "FastTree failed (see $LOG)"
-record tree "$FT" "$("$FT" -expert 2>&1 | grep -m1 -o 'version [0-9.]*' | cut -d' ' -f2)" "${ftargs[*]}" $((SECONDS - t0))
+record tree "$FT" "$("$FT" -expert 2>&1 | head -n1 | sed 's/^Detailed usage for FastTree //; s/:$//')" "${ftargs[*]}" $((SECONDS - t0))
 say "tree: $(grep -o ',' family.nwk | wc -l | awk '{print $1+1}') tips ($FT ${ftargs[*]})"
 
 # ---------------------------------------------------------------- 6–9. root, annotate, duplications, export

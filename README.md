@@ -58,7 +58,7 @@ Tool versions used in the browser and pinned in the CLI container:
 | Align | Kalign | 3.3.1 | 3.3.2 (3.3.1 isn't on bioconda) |
 | Align | MUSCLE | 5.1.0 | 5.1.0 |
 | Trim | site's JS (`js/trim.js`) | — | same code, run by Node |
-| Tree | FastTree, via [phylo-fasttree-wasm](https://github.com/hyphaltip/phylo-fasttree-wasm) | 2.1.11 | 2.1.11 (native); CI checks it against the WASM build |
+| Tree | FastTree, via [phylo-fasttree-wasm](https://github.com/hyphaltip/phylo-fasttree-wasm) | 2.1.11 single precision | 2.1.11 `FastTree-browser` (default: byte-identical to the site, checked in CI) or bioconda's double-precision `FastTree`/`FastTreeMP` (`--fasttree double`) |
 | Root / annotate / duplications / export | site's JS (`js/tree.js`, `js/annotate.js`, `js/export.js`) | — | same code, run by Node |
 
 The command-line tool is described in
@@ -348,9 +348,12 @@ FastTree -nt -gtr -gamma family.trim.fa > family.nwk          # nucleotide GTR
 # For publication, consider ML with ultrafast bootstrap: iqtree2 -s family.trim.fa -m MFP -B 1000 -T AUTO
 ```
 
-The browser compiles FastTree 2.1.11's C source to WebAssembly unchanged, so
-a CLI FastTree 2.1.11 run with the same options and input should give the
-same tree. The exact arguments are recorded in the metadata table.
+The browser runs FastTree 2.1.11 in **single precision**. To reproduce its
+trees exactly on the CLI, use a single-precision, strict-floating-point build
+(`cli/build-fasttree-browser.sh`, or `FastTree-browser` in the container).
+Bioconda's `fasttree` package is the double-precision variant: close, but
+nucleotide trees with short branches can differ. The exact arguments are
+recorded in the metadata table.
 
 ### Step 6 · Rooting
 
@@ -516,6 +519,21 @@ and `js/export.js`). They produce exactly what the browser would, including
 MAD rooting and the same SVG renderer. The search, alignment and tree steps
 use the native tools at the versions in the table above.
 
+**Two FastTree builds.** FastTree can be compiled in single or double
+precision, and the two give different trees on alignments with very short
+branches. In CI, on the bundled 24-sequence nucleotide example, the
+double-precision build gave a different topology (one split) and branch
+lengths up to 0.09 apart with GTR+Γ; protein trees agreed to within 3e-4.
+- **`--fasttree browser`** (default) uses `FastTree-browser`: upstream
+  FastTree 2.1.11 compiled the way the website's WASM build is (single
+  precision, no SSE, strict floating point `-ffp-contract=off`), by
+  `cli/build-fasttree-browser.sh`. Its trees are **byte-identical to the
+  website's**, which CI checks.
+- **`--fasttree double`** uses bioconda's `FastTree`/`FastTreeMP`, the
+  double-precision build. It is multithreaded, and FastTree's author
+  recommends it for very similar sequences, but its trees won't exactly match
+  the website's.
+
 ### Get it
 
 **Container** (recommended; linux/amd64), built and tested by CI
@@ -553,6 +571,7 @@ apptainer exec famfate.sif famfate.sh -q P46151 -p UP000001805,UP000005640 -T $S
 ```sh
 git clone https://github.com/hyphaltip/phylo-fam-fate && cd phylo-fam-fate
 mamba env create -f environment.yml && mamba activate famfate
+./cli/build-fasttree-browser.sh        # compiles FastTree-browser into $CONDA_PREFIX/bin (needs gcc)
 ./cli/famfate.sh -h
 ```
 
@@ -573,7 +592,7 @@ Input (one of):
   -a, --aligned FILE       aligned FASTA: skip search and alignment
 Search:      -p UPID,UPID…  --no-sprot  --db FILE[,FILE]  -t blastp|blastn|phmmer
              -e 1e-3 (search E)  -E 1e-5 (keep-hit E)  -n 50  --hsp-only  --no-query
-Align/tree:  -A kalign|muscle  -g 0.5|none  -c 0  -m lg|wag|jtt|nt|gtr  --no-gamma  --fasttree-args "…"
+Align/tree:  -A kalign|muscle  -g 0.5|none  -c 0  -m lg|wag|jtt|nt|gtr  --no-gamma  --fasttree browser|double  --fasttree-args "…"
 Post:        -r midpoint|mad|none|outgroup:RANK:NAME  --rank phylum  --no-annotate  --no-domains
 General:     -o OUTDIR  -d DBDIR  -T THREADS  -h  -V
 ```
@@ -650,10 +669,11 @@ workflow builds the image and runs `cli/tests/ci.sh` inside it:
 
 1. **Offline pipeline:** family → Kalign → trim → FastTree, and MUSCLE/WAG
    without trimming.
-2. **FastTree parity:** native FastTree and the browser's WASM build, on
-   protein and nucleotide alignments with several models. It passes when the
-   Newick is byte-identical, or else when topology is the same and branch
-   lengths are within 1e-3.
+2. **FastTree parity:** `FastTree-browser` and the website's WASM build must
+   give **byte-identical** Newick on nucleotide (JC, GTR+Γ) and protein (JTT,
+   LG+Γ, WAG) alignments, and `famfate.sh`'s own tree must equal the
+   website's. Bioconda's double-precision build is compared as well, and the
+   difference is reported without failing the run.
 3. **Live search:** MET12 against the *S. cerevisiae* and *E. coli*
    proteomes. It checks that:
    - all hits come back full-length;

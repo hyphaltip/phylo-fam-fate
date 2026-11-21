@@ -1,7 +1,16 @@
 # phylo-fam-fate command-line container: famfate.sh + pinned BLAST+/HMMER/
 # Kalign/MUSCLE/FastTree + the website's JS (trim, rooting, annotation, export).
+# Two FastTree 2.1.11 builds: FastTree-browser (single precision, identical to
+# the website; the default) and bioconda's FastTree/FastTreeMP (double precision).
 #   docker run --rm -u $(id -u):$(id -g) -v "$PWD":/data ghcr.io/hyphaltip/phylo-fam-fate-cli famfate.sh -q P46151
 #   apptainer exec docker://ghcr.io/hyphaltip/phylo-fam-fate-cli famfate.sh -q P46151
+# FastTree as the browser runs it: single precision, strict FP (see cli/build-fasttree-browser.sh)
+FROM debian:bookworm-slim AS fasttree
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY cli/build-fasttree-browser.sh /tmp/
+RUN bash /tmp/build-fasttree-browser.sh /out
+
 FROM mambaorg/micromamba:1.5.10
 
 LABEL org.opencontainers.image.title="phylo-fam-fate-cli" \
@@ -20,6 +29,7 @@ COPY js/                 /opt/phylo-fam-fate/js/
 COPY assets/fasttree/    /opt/phylo-fam-fate/assets/fasttree/
 COPY assets/examples/    /opt/phylo-fam-fate/assets/examples/
 COPY cli/                /opt/phylo-fam-fate/cli/
+COPY --from=fasttree /out/bin/FastTree-browser /usr/local/bin/FastTree-browser
 USER root
 RUN chmod -R a+rX /opt/phylo-fam-fate \
  && chmod a+x /opt/phylo-fam-fate/cli/famfate.sh /opt/phylo-fam-fate/cli/famfate-js.mjs \
