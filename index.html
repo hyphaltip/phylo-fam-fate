@@ -90,11 +90,13 @@
               <option value="phmmer">phmmer (protein, HMMER)</option>
             </select>
           </label>
-          <label>Database (FASTA) <input type="file" id="search-db" accept=".fa,.fasta,.fas,.fna,.faa"></label>
+          <label>Database file <input type="file" id="search-db" accept=".fa,.fasta,.fas,.fna,.faa,.gz"></label>
+          <label>Database URL <input type="url" id="search-db-url" placeholder="https://…/db.fa.gz" style="width:22rem"></label>
+          <button class="btn small" id="search-db-url-load" type="button">Load URL</button>
           <label>Max hits <input type="number" id="search-maxhits" value="50" min="1" max="500"></label>
           <button class="btn" id="search-run">Run search</button>
         </div>
-        <p class="hint">The database is a FASTA file you provide. It stays on your device. Biowasm builds a local index in-browser.</p>
+        <p class="hint" id="search-db-info">Provide a FASTA database as a local file or a URL. <strong>.gz files are decompressed automatically.</strong> URLs must allow CORS. Biowasm builds a local index in-browser.</p>
         <pre class="preview hidden" id="search-preview"></pre>
       </div>
     </div>

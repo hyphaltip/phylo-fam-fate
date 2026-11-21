@@ -13,7 +13,7 @@ and infer a tree — all locally in the browser, with no server-side compute.
                              ↓
           ┌──────────────────────────────────────────────┐
           │  Search (optional): local BLAST / phmmer    │
-          │  (Biowasm WASM, user-provided database)     │
+          │  (Biowasm WASM; DB from file, URL, or .gz)  │
           └──────────────────┬───────────────────────────┘
                              ↓
           ┌──────────────────────────────────────────────┐
@@ -41,6 +41,22 @@ timing, and provenance.
 - Biowasm's `CLI.mount()` streams remote files — large references need not be
   fully loaded into memory
 - GitHub Pages: 1 GB site/repo limit, 100 MB max individual file
+
+### Search database sources
+The search database (FASTA) can be loaded three ways:
+
+1. **Local file** — pick a FASTA (`.fa`, `.fasta`, `.faa`, …) from your device.
+2. **URL** — paste an `https://…` URL and click **Load URL**. The server must
+   send CORS headers (`Access-Control-Allow-Origin`), otherwise the browser
+   blocks the fetch. Public FASTA mirrors and GitHub raw URLs work.
+3. **Compressed** — both local files and URLs may be **gzip** (`.gz`). Gzip is
+   detected by magic bytes (`1f 8b`), not the filename, so content-encoding and
+   content-type don't matter. Decompression uses the browser's native
+   `DecompressionStream('gzip')`. Plain-text FASTA works unchanged.
+
+The decompressed database is held in browser memory only; nothing is uploaded.
+The DB source, sequence count, and compressed/decompressed sizes are recorded
+in the metadata table.
 
 ### Remote APIs (CORS-enabled, callable directly from the browser)
 | API | Use | Rate limit |

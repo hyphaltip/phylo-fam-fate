@@ -6,8 +6,14 @@ const requestedTools = new Set();
 function parseSpec(spec) {
   const p = spec.split('/');
   return p.length === 3
-    ? { tool: p[0], version: p[2], program: p[1], loading: 'lazy' }
-    : { tool: p[0], version: p[1], loading: 'lazy' };
+    ? { tool: p[0], version: p[2], program: p[1] }
+    : { tool: p[0], version: p[1] };
+}
+
+/** Normalize Aioli exec() output (plain string, or {stdout, stderr} object). */
+function execText(result) {
+  if (typeof result === 'string') return result;
+  return result?.stdout ?? '';
 }
 
 export async function initTools(tools) {
@@ -19,7 +25,9 @@ export async function initTools(tools) {
   if (cli && requestedTools.size === before) return cli;
   // Aioli's filesystem is shared per instance; re-init with the full tool set
   // whenever a new tool is added so earlier tools remain available.
-  cli = await new Aioli([...requestedTools].map(parseSpec), { printInterleaved: false });
+  // Use Aioli's default output mode: exec() returns a plain string. Some
+  // programs (notably BLAST) do not populate stdout when printInterleaved=false.
+  cli = await new Aioli([...requestedTools].map(parseSpec));
   return cli;
 }
 
@@ -49,25 +57,35 @@ export async function runAligner(tool, fasta) {
   // Biowasm tools run with cwd=/shared/data; output files are relative to it.
   const out = await cli.cat('aligned.fa');
   if (typeof out !== 'string' || !out.trim()) {
-    throw new Error(`aligner produced no output (stdout: ${(result.stdout || '').slice(-200)})`);
+    throw new Error(`aligner produced no output (stdout: ${execText(result).slice(-200)})`);
   }
   return out;
 }
 
 /** Run local BLAST against a user-provided FASTA database. */
 export async function runBlast(program, queryFasta, dbFasta, maxHits) {
-  await initTools(['blast/2.17.0']);
+  // Biowasm exposes each BLAST binary as a separate program (there is no
+  // monolithic `blast.js`), so request the chosen program plus makeblastdb.
+  await initTools([`blast/${program}/2.17.0`, 'blast/makeblastdb/2.17.0']);
   await cli.mount([
     { name: 'query.fa', data: queryFasta },
     { name: 'db.fa', data: dbFasta },
   ]);
   // Build a local BLAST database from the mounted FASTA
-  const dbType = program === 'blastn' ? 'nucl' : 'prot';
-  await cli.exec(`makeblastdb -in db.fa -dbtype ${dbType} -out mydb`);
+  const isNucleotide = program === 'blastn';
+  const dbType = isNucleotide ? 'nucl' : 'prot';
+  // v5 databases use LMDB, which is unavailable in the WASM filesystem;
+  // v4 uses traditional .pin/.psq index files and works in-browser.
+  await cli.exec(`makeblastdb -in db.fa -dbtype ${dbType} -out mydb -blastdb_version 4`);
+  // Use a small word size for short queries; disable low-complexity masking so
+  // tandem-repeat queries aren't filtered out entirely.
+  const filter = isNucleotide ? '-task blastn -dust no' : '-seg no';
   const result = await cli.exec(
-    `${program} -query query.fa -db mydb -max_target_seqs ${maxHits} -outfmt 6`
+    `${program} -query query.fa -db mydb ${filter} -max_target_seqs ${maxHits} -outfmt 6`
   );
-  return result.stdout || result;
+  const text = execText(result);
+  if (!text.trim()) throw new Error(`${program} produced no hits — try a different query/database`);
+  return text;
 }
 
 /** Run local phmmer against a user-provided FASTA database. */
@@ -80,7 +98,9 @@ export async function runPhmmer(queryFasta, dbFasta, maxHits) {
   const result = await cli.exec(
     `phmmer --maxhits ${maxHits} --domT 1e-3 query.fa db.fa`
   );
-  return result.stdout || result;
+  const text = execText(result);
+  if (!text.trim()) throw new Error('phmmer produced no hits — try a different query/database');
+  return text;
 }
 
 /** Parse BLAST tabular output -> array of subject IDs. */

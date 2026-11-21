@@ -11,6 +11,8 @@ const $ = (id) => document.getElementById(id);
 // Pipeline state
 const state = {
   rawFasta: '',       // original input sequences
+  dbFasta: '',        // search database (decompressed FASTA)
+  dbSource: '',       // human-readable DB source
   searchFasta: '',    // sequences from search hits
   alignedFasta: '',   // aligned sequences
   trimmedFasta: '',   // trimmed alignment
@@ -184,20 +186,84 @@ $('api-fetch').addEventListener('click', async () => {
 // ---------------------------------------------------------------------------
 // STEP 2: Search (optional)
 // ---------------------------------------------------------------------------
+/** Decode a FASTA buffer, transparently decompressing gzip (magic bytes 1f 8b). */
+async function decodeFastaBuffer(buf, label) {
+  const bytes = new Uint8Array(buf);
+  const gzipped = bytes.length > 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+  let text;
+  if (gzipped) {
+    if (typeof DecompressionStream === 'undefined') {
+      throw new Error('gzip requires a browser with DecompressionStream support');
+    }
+    const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
+    text = await new Response(stream).text();
+  } else {
+    text = new TextDecoder().decode(buf);
+  }
+  const records = parseFasta(text);
+  if (!records.length) throw new Error(`${label} does not contain any FASTA records`);
+  return { text, records, gzipped, bytes: bytes.length };
+}
+
+/** Accept a decoded FASTA database and update the UI. */
+function setSearchDb({ text, records, gzipped, bytes }, source) {
+  state.dbFasta = text;
+  state.dbSource = source;
+  const size = gzipped ? `${bytes.toLocaleString()} B gzipped → ${text.length.toLocaleString()} B` : `${text.length.toLocaleString()} B`;
+  $('search-db-info').innerHTML = `<strong>${escapeHtml(source)}</strong> · ${records.length.toLocaleString()} sequences · ${size} · ready to search`;
+  stepStatus('search', `${records.length} db seq`, 'done');
+  status(`Database loaded: ${records.length.toLocaleString()} sequences (${size})`, 'success');
+}
+
+// Database file input (also handles .gz)
+$('search-db').addEventListener('change', async () => {
+  const file = $('search-db').files[0];
+  if (!file) return;
+  try {
+    status(`Reading database ${file.name}…`);
+    const decoded = await decodeFastaBuffer(await file.arrayBuffer(), file.name);
+    setSearchDb(decoded, file.name);
+  } catch (e) {
+    status(`Database error: ${e.message}`, 'error');
+    stepStatus('search', 'db error');
+  }
+});
+
+// Database URL input (CORS required; .gz detected by magic bytes)
+$('search-db-url-load').addEventListener('click', async () => {
+  const url = $('search-db-url').value.trim();
+  if (!url) { status('Enter a database URL first', 'error'); return; }
+  $('search-db-url-load').disabled = true;
+  status(`Fetching database from URL…`);
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status} from ${new URL(url).host}`);
+    const decoded = await decodeFastaBuffer(await resp.arrayBuffer(), 'URL');
+    setSearchDb(decoded, new URL(url).host + '/' + url.split('/').pop());
+  } catch (e) {
+    const hint = e.message.toLowerCase().includes('failed to fetch')
+      ? ' (the server likely lacks CORS headers)'
+      : '';
+    status(`URL database error: ${e.message}${hint}`, 'error');
+    stepStatus('search', 'db error');
+  } finally {
+    $('search-db-url-load').disabled = false;
+  }
+});
+
 $('search-enable').addEventListener('change', () => {
   $('search-options').classList.toggle('hidden', !$('search-enable').checked);
-  if ($('search-enable').checked && !$('search-db').files.length) {
-    status('Select a database FASTA file for the local search', 'info');
+  if ($('search-enable').checked && !state.dbFasta) {
+    status('Load a database file or URL for the local search', 'info');
   }
 });
 
 $('search-run').addEventListener('click', async () => {
   const tool = $('search-tool').value;
-  const dbFile = $('search-db').files[0];
   if (!state.rawFasta) { status('Load input sequences first', 'error'); return; }
-  if (!dbFile) { status('Select a database FASTA file', 'error'); return; }
+  if (!state.dbFasta) { status('Load a database file or URL first', 'error'); return; }
 
-  const dbFasta = await dbFile.text();
+  const dbFasta = state.dbFasta;
   const maxHits = parseInt($('search-maxhits').value, 10) || 50;
   stepStatus('search', 'running…', 'running');
   status(`Running ${tool} locally…`);
@@ -229,7 +295,7 @@ $('search-run').addEventListener('click', async () => {
     $('align-input').querySelector('option[value="search"]').textContent = `Search hits (${hitRecords.length})`;
     stepStatus('search', `${hitRecords.length} hits`, 'done');
     recordMeta('Search', tool, 'biowasm', `maxHits=${maxHits}`,
-      `${state.records.length} queries + ${dbRecords.length} db`, `${hitRecords.length} hits`,
+      `${state.records.length} queries + ${dbRecords.length} db (${state.dbSource})`, `${hitRecords.length} hits`,
       performance.now() - t0);
     status(`Found ${hitRecords.length} hits — align them in step 3`, 'success');
   } catch (e) {
