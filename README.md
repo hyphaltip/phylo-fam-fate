@@ -84,6 +84,14 @@ checkboxes, then **Use selected for alignment** to pass only those sequences to
 step 3. BLAST subject sequences are taken from the `sseq` column of the tabular
 output, and phmmer hits are recovered from the in-memory DB by subject ID.
 
+Hits are grouped **one row per subject protein**. When BLAST reports several
+HSPs (local alignments) to the same protein, or several queries hit it, the row
+shows the best HSP and an **“N HSPs ▸”** toggle that expands the individual
+alignments with their subject coordinates. A protein passes the cutoffs if its
+best HSP does. Its sequence for alignment is the best HSP extended by any
+overlapping or adjacent HSPs. Residues between separated HSPs aren't in BLAST's
+output, so those gaps stay unfilled.
+
 ### Runtime timing
 Each step's elapsed time is printed to the browser console
 (`[phylo-fam-fate] …`) and shown in the **timing strip** above the pipeline.

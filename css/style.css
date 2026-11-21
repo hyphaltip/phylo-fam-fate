@@ -213,3 +213,9 @@ footer a { color: var(--primary); }
 .chips button { border: none; background: #e2e8f0; color: #475569; width: 1.3rem; height: 1.3rem; border-radius: 50%; cursor: pointer; line-height: 1; font-size: 0.85rem; }
 .chips button:hover { background: var(--danger); color: white; }
 .hint.warn { color: #b45309; }
+
+/* Grouped BLAST hits: one row per protein, HSPs nested underneath */
+.hit-table tr.hsp-row td { background: #f8fafc; color: var(--muted); font-size: 0.76rem; border-bottom-style: dashed; }
+.hit-table tr.hsp-row td:nth-child(2) { padding-left: 1.4rem; }
+.hsp-toggle { margin-left: 0.4rem; padding: 0.05rem 0.4rem; font: inherit; font-size: 0.7rem; border: 1px solid var(--border); border-radius: 999px; background: #eef2ff; color: #3730a3; cursor: pointer; }
+.hsp-toggle:hover { background: #e0e7ff; }

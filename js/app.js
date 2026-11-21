@@ -19,7 +19,9 @@ const state = {
   dbSource: '',       // human-readable DB source
   dbPreset: 'uniprot-sprot',
   proteomes: [],      // reference proteome catalogue
-  searchHits: [],     // structured hit records
+  searchHits: [],     // structured hit records (one per HSP)
+  hitGroups: [],      // hits grouped per subject protein
+  expandedHits: new Set(),
   selectedHits: new Set(),
   searchFasta: '',    // sequences from selected hits
   alignedFasta: '',   // aligned sequences
@@ -297,7 +299,7 @@ function setRawFasta(fasta, source) {
   state.alignedFasta = '';
   state.trimmedFasta = '';
   state.searchFasta = '';
-  state.searchHits = [];
+  state.searchHits = []; state.hitGroups = []; state.expandedHits = new Set();
   state.selectedHits = new Set();
   state.newick = '';
   state.tree = null;
@@ -589,9 +591,12 @@ $('search-enable').addEventListener('change', () => {
 });
 
 // --- Live hit filtering + selection --------------------------------------------
-// Hit keys are stable numeric ids assigned after sorting; using an index (rather
-// than a query\0name string) avoids embedding control characters in HTML attrs.
-const hitKey = h => String(h.id);
+// BLAST reports one row per HSP, so one subject protein can appear several
+// times (several local alignments, or hits from several queries). Hits are
+// grouped by subject: one selectable row per protein, its HSPs nested below.
+// Group keys are stable numeric ids assigned after sorting (not names, which
+// can contain characters awkward in HTML attributes).
+const hitKey = g => String(g.id);
 
 function passesCutoffs(h) {
   const maxE = parseFloat($('hit-evalue').value);
@@ -603,35 +608,93 @@ function passesCutoffs(h) {
     && (h.pident == null || h.pident >= minPid)
     && (h.length == null || h.length >= minLen);
 }
+/** A protein passes if its best HSP does. */
+const groupPasses = g => passesCutoffs(g.best);
+
+/** Combine one subject's HSPs into the longest contiguous stretch of subject
+ *  residues that contains the best HSP. Overlapping/adjacent HSPs extend it;
+ *  a gap between HSPs can't be filled (BLAST only reports aligned residues). */
+function mergeHspSeq(hsps, best) {
+  const usable = hsps.filter(h => h.seq && h.sstart <= h.send && h.seq.length === h.send - h.sstart + 1);
+  if (!usable.includes(best)) return best.seq;
+  const res = new Map();
+  for (const h of usable) for (let i = 0; i < h.seq.length; i++) {
+    const pos = h.sstart + i;
+    if (!res.has(pos)) res.set(pos, h.seq[i]);
+  }
+  let lo = best.sstart, hi = best.send;
+  while (res.has(lo - 1)) lo--;
+  while (res.has(hi + 1)) hi++;
+  let seq = '';
+  for (let p = lo; p <= hi; p++) seq += res.get(p);
+  return seq;
+}
+
+function groupHits(hits) {
+  const byName = new Map();
+  for (const h of hits) {            // hits are E-value sorted: first = best
+    let g = byName.get(h.name);
+    if (!g) { g = { name: h.name, best: h, hsps: [] }; byName.set(h.name, g); }
+    g.hsps.push(h);
+  }
+  const groups = [...byName.values()];
+  groups.forEach((g, i) => {
+    g.id = i;
+    g.queries = [...new Set(g.hsps.map(h => h.query))];
+    g.seq = mergeHspSeq(g.hsps, g.best);
+    const spans = g.hsps.filter(h => h.sstart != null).map(h => [Math.min(h.sstart, h.send), Math.max(h.sstart, h.send)]);
+    g.range = spans.length ? [Math.min(...spans.map(s => s[0])), Math.max(...spans.map(s => s[1]))] : null;
+  });
+  return groups;
+}
 
 function fmtE(v) { return v < 0.001 ? v.toExponential(1) : v.toFixed(4); }
 
 function renderHits() {
   const maxHits = parseInt($('search-maxhits').value, 10) || 50;
-  const eligible = state.searchHits.filter(passesCutoffs);
-  const shown = eligible.slice(0, maxHits);
-  const html = shown.map(h => {
-    const key = hitKey(h);
+  const shown = state.hitGroups.filter(groupPasses).slice(0, maxHits);
+  const html = shown.map(g => {
+    const key = hitKey(g);
+    const h = g.best;
     const checked = state.selectedHits.has(key) ? 'checked' : '';
-    return `<tr class="${passesCutoffs(h) ? '' : 'filtered-out'}">
+    const n = g.hsps.length;
+    const open = state.expandedHits.has(key);
+    const toggle = n > 1
+      ? ` <button type="button" class="hsp-toggle" data-key="${escapeAttr(key)}" aria-expanded="${open}" title="Show the ${n} alignments to this protein">${n} HSPs ${open ? '▾' : '▸'}</button>`
+      : '';
+    const queries = g.queries.length > 1 ? `${escapeHtml(trunc(h.query, 16))} +${g.queries.length - 1}` : escapeHtml(h.query);
+    let row = `<tr class="hit-group">
       <td><input type="checkbox" class="hit-check" data-key="${escapeAttr(key)}" ${checked}></td>
-      <td title="${escapeAttr(h.name)}">${escapeHtml(trunc(h.name, 28))}</td>
-      <td>${escapeHtml(h.query)}</td>
+      <td title="${escapeAttr(g.name)}">${escapeHtml(trunc(g.name, 28))}${toggle}</td>
+      <td title="${escapeAttr(g.queries.join(', '))}">${queries}</td>
       <td>${fmtE(h.evalue)}</td>
       <td>${h.score.toFixed(1)}</td>
       <td>${h.pident == null ? '—' : h.pident.toFixed(1)}</td>
-      <td>${h.length == null ? '—' : h.length}</td>
+      <td title="${escapeAttr(`${g.seq.length} residues used for alignment`)}">${h.length == null ? '—' : h.length}</td>
+      <td>${g.range ? `${g.range[0]}–${g.range[1]}` : '—'}</td>
     </tr>`;
+    if (open) row += g.hsps.map((x, i) => `<tr class="hsp-row${passesCutoffs(x) ? '' : ' filtered-out'}">
+      <td></td>
+      <td>↳ HSP ${i + 1}</td>
+      <td>${escapeHtml(x.query)}</td>
+      <td>${fmtE(x.evalue)}</td>
+      <td>${x.score.toFixed(1)}</td>
+      <td>${x.pident == null ? '—' : x.pident.toFixed(1)}</td>
+      <td>${x.length == null ? '—' : x.length}</td>
+      <td>${x.sstart != null ? `${x.sstart}–${x.send}` : '—'}</td>
+    </tr>`).join('');
+    return row;
   }).join('');
-  $('hit-table-body').innerHTML = html || '<tr><td colspan="7" class="hint">No hits pass the current cutoffs</td></tr>';
+  $('hit-table-body').innerHTML = html || '<tr><td colspan="8" class="hint">No hits pass the current cutoffs</td></tr>';
   $('hit-controls').classList.remove('hidden');
   $('hit-results').classList.remove('hidden');
   updateHitSummary();
 }
 
 function updateHitSummary() {
-  const chosen = state.searchHits.filter(h => state.selectedHits.has(hitKey(h)) && passesCutoffs(h)).length;
-  $('hit-summary').textContent = `${chosen} selected · ${state.searchHits.length} total hits`;
+  const chosen = state.hitGroups.filter(g => state.selectedHits.has(hitKey(g)) && groupPasses(g)).length;
+  const nHsp = state.searchHits.length, nProt = state.hitGroups.length;
+  $('hit-summary').textContent = `${chosen} selected · ${nProt} proteins` + (nHsp > nProt ? ` (${nHsp} HSPs)` : '');
   $('hit-use-selected').textContent = `Use ${chosen} selected for alignment →`;
   $('hit-use-selected').disabled = chosen === 0;
 }
@@ -643,12 +706,19 @@ $('hit-table-body').addEventListener('change', e => {
   else state.selectedHits.delete(cb.dataset.key);
   updateHitSummary();
 });
+$('hit-table-body').addEventListener('click', e => {
+  const t = e.target.closest('.hsp-toggle');
+  if (!t) return;
+  const k = t.dataset.key;
+  state.expandedHits.has(k) ? state.expandedHits.delete(k) : state.expandedHits.add(k);
+  renderHits();
+});
 
 ['hit-evalue', 'hit-score', 'hit-pident', 'hit-length'].forEach(id => {
   $(id).addEventListener('input', renderHits);
 });
 $('hit-select-all').addEventListener('click', () => {
-  state.searchHits.filter(passesCutoffs).forEach(h => state.selectedHits.add(hitKey(h)));
+  state.hitGroups.filter(groupPasses).forEach(g => state.selectedHits.add(hitKey(g)));
   renderHits();
 });
 $('hit-select-none').addEventListener('click', () => {
@@ -656,18 +726,18 @@ $('hit-select-none').addEventListener('click', () => {
 });
 
 $('hit-use-selected').addEventListener('click', () => {
-  const picked = state.searchHits.filter(h => state.selectedHits.has(hitKey(h)) && passesCutoffs(h) && h.seq);
-  // One subject can hit several queries/HSPs; FastTree rejects duplicate
-  // names, so keep the best (first, E-value-sorted) record per subject.
+  const picked = state.hitGroups.filter(g => state.selectedHits.has(hitKey(g)) && groupPasses(g) && g.seq);
+  // Groups are already one per subject; queries may share a name with a hit
+  // (FastTree rejects duplicate names), so skip those.
   const seen = new Set();
   const out = [];
   if ($('hit-include-query').checked) {
     for (const r of state.records) { if (!seen.has(r.name)) { seen.add(r.name); out.push(r); } }
   }
-  for (const h of picked) {
-    if (seen.has(h.name)) continue;
-    seen.add(h.name);
-    out.push({ name: h.name, seq: h.seq });
+  for (const g of picked) {
+    if (seen.has(g.name)) continue;
+    seen.add(g.name);
+    out.push({ name: g.name, seq: g.seq });
   }
   const chosen = out;
   if (!chosen.length) { status('No usable sequences in the selection', 'error'); return; }
@@ -676,8 +746,10 @@ $('hit-use-selected').addEventListener('click', () => {
   $('align-input').querySelector('option[value="search"]').textContent = `Search hits (${chosen.length})`;
   stepStatus('search', `${chosen.length} selected`, 'done');
   status(`${chosen.length} sequences ready for alignment`, 'success');
-  recordMeta('Select hits', 'browser', VERSION, 'cutoffs + manual selection',
-    `${state.searchHits.length} hits`, `${chosen.length} sequences (${picked.length} hits, deduplicated${$('hit-include-query').checked ? ', + queries' : ''})`, null);
+  const merged = picked.filter(g => g.hsps.length > 1).length;
+  recordMeta('Select hits', 'browser', VERSION, 'cutoffs + manual selection; HSPs grouped per subject',
+    `${state.hitGroups.length} proteins (${state.searchHits.length} HSPs)`,
+    `${chosen.length} sequences (${picked.length} proteins${merged ? `, ${merged} with multiple HSPs merged` : ''}${$('hit-include-query').checked ? ', + queries' : ''})`, null);
 });
 
 // --- Run the search ------------------------------------------------------------
@@ -729,16 +801,18 @@ $('search-run').addEventListener('click', async () => {
     $('search-preview').classList.remove('hidden');
 
     hits.sort((a, b) => a.evalue - b.evalue);
-    hits.forEach((h, i) => { h.id = i; });
     state.searchHits = hits;
-    state.selectedHits = new Set(hits.filter(passesCutoffs).slice(0, maxHits).map(hitKey));
+    state.hitGroups = groupHits(hits);
+    state.expandedHits = new Set();
+    state.selectedHits = new Set(state.hitGroups.filter(groupPasses).slice(0, maxHits).map(hitKey));
     renderHits();
-    stepStatus('search', `${hits.length} hits`, 'done');
+    const nProt = state.hitGroups.length;
+    stepStatus('search', `${nProt} proteins`, 'done');
     const ms = performance.now() - t0;
     recordMeta('Search', tool, TOOL_VERSIONS[tool],
       `maxHits=${maxHits}; evalue≤${$('hit-evalue').value}, score≥${$('hit-score').value}, pid≥${$('hit-pident').value}, len≥${$('hit-length').value}`,
-      `${state.records.length} queries + ${state.dbSource}`, `${hits.length} hits`, ms);
-    status(`Found ${hits.length} hits — filter and select which to align`, 'success');
+      `${state.records.length} queries + ${state.dbSource}`, `${nProt} proteins (${hits.length} HSPs)`, ms);
+    status(`Found ${nProt} proteins${hits.length > nProt ? ` (${hits.length} HSPs)` : ''} — filter and select which to align`, 'success');
   } catch (e) {
     showStepError('search', `Search failed: ${e.stack || e.message || e}`);
     status(`Search failed: ${e.message}`, 'error');
