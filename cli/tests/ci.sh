@@ -105,7 +105,11 @@ check "IQ-TREE model recorded"             grep -q 'model ' t6/run.json
 famfate.sh --family "$EX/proteins.fa" --aligner mafft --no-annotate -o t6b -T 2 >/dev/null 2>t6b.err || { cat t6b.err; bad "pipeline ran"; }
 check "MAFFT alignment, 16 sequences"      test "$(grep -c '>' t6b/family.aln.fa)" -eq 16
 
-section "7. option errors"
+section "7. version"
+site_v=$(grep -o "VERSION = '[0-9.]*'" "$SITE/js/version.js" | grep -o "[0-9][0-9.]*")
+check "famfate.sh --version matches js/version.js ($site_v)" bash -c "famfate.sh --version | grep -qx 'famfate.sh $site_v'"
+
+section "8. option errors"
 check "rejects two inputs"   bash -c '! famfate.sh -q P46151 --family x.fa 2>/dev/null'
 check "rejects bad tool"     bash -c '! famfate.sh -q P46151 -t diamond 2>/dev/null'
 check "rejects bad tree"     bash -c '! famfate.sh -a /opt/phylo-fam-fate/cli/tests/data/aa_aligned.fa --tree phyml --no-annotate -o bad 2>/dev/null'

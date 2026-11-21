@@ -1,6 +1,7 @@
 /* Main application: orchestrates the search -> align -> trim -> tree pipeline. */
 
 import { retrieve, parseFasta, toFasta } from './api.js';
+import { VERSION, RELEASE_URL } from './version.js';
 import { runAligner, runBlast, runPhmmer, parseBlastHits, parsePhmmerHits, TOOL_VERSIONS } from './tools.js';
 import { trimAlignment } from './trim.js';
 import { parseNewick, drawTree, treeStats, midpointRoot, ladderize, rootOnOutgroup, madRoot, labelEvents, leafNames } from './tree.js';
@@ -43,7 +44,11 @@ const state = {
   timings: [],        // {step, ms} for the runtime strip
 };
 
-const VERSION = '0.1.0';
+// Version badge (header/footer) from the single source in version.js
+for (const el of document.querySelectorAll('.app-version')) {
+  el.textContent = `v${VERSION}`;
+  if (el.tagName === 'A') el.href = RELEASE_URL;
+}
 
 // ---------------------------------------------------------------------------
 // UI helpers

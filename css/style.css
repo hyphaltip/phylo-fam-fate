@@ -265,3 +265,8 @@ footer a { color: var(--primary); }
 .handoff[open] > summary { background: #eef2ff; }
 .handoff-body { margin-top: 0.5rem; padding: 0.6rem 0.8rem; border: 1px solid var(--border); border-radius: 8px; background: #fcfcfd; max-width: 48rem; }
 .handoff-body .row { gap: 0.5rem 1rem; align-items: center; }
+
+/* Version badge in the header */
+.version-badge { display: inline-block; vertical-align: middle; margin-left: 0.5rem; padding: 0.1rem 0.55rem; border-radius: 999px;
+  font-size: 0.8rem; font-weight: 600; letter-spacing: 0; color: #fff; background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.35); text-decoration: none; }
+.version-badge:hover { background: rgba(255,255,255,0.28); }

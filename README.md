@@ -7,7 +7,9 @@ taxonomy, Pfam domains and function, rooted several ways, and marked with
 gene duplications. Everything runs **in your browser** (WebAssembly), with no
 server, account or upload.
 
-**Live site:** <https://hyphaltip.github.io/phylo-fam-fate/>
+**Live site:** <https://hyphaltip.github.io/phylo-fam-fate/> · **Current release:**
+[v0.1.0](https://github.com/hyphaltip/phylo-fam-fate/releases/tag/v0.1.0)
+([changelog](CHANGELOG.md); container `ghcr.io/hyphaltip/phylo-fam-fate-cli:0.1.0`)
 
 Every step uses a standard tool (BLAST+, HMMER, Kalign, MUSCLE, FastTree) at a
 recorded version and parameters. This README gives the **equivalent
@@ -894,6 +896,15 @@ python3 -m http.server 8000      # any static server; ES modules need http://, n
 
 There is no build step: the site uses ES modules and CDN-hosted tools.
 `?autotest=1` runs a tiny end-to-end pipeline on load, as a smoke test.
+
+## Releasing
+
+1. Bump the version in `js/version.js` and `cli/famfate.sh` (`VERSION=`); CI
+   fails if they differ. The site shows it in the header and footer.
+2. Add a section to `CHANGELOG.md`.
+3. Tag and push: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
+   CI publishes the container as `:X.Y.Z`, `:X.Y` and `:latest`.
+4. Create the GitHub release from the changelog section.
 
 ## Deploy
 
