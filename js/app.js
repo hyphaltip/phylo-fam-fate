@@ -5,6 +5,7 @@ import { runAligner, runBlast, runPhmmer, parseBlastHits, parsePhmmerHits, TOOL_
 import { trimAlignment } from './trim.js';
 import { parseNewick, drawTree, treeStats, midpointRoot, ladderize, rootOnOutgroup, madRoot, labelEvents, leafNames } from './tree.js';
 import { annotateLabels, fetchPfamDomains, accessionOf, taxonAt, colourGroups, domainColour, RANKS, OTHER } from './annotate.js';
+import { toNewick, annotationsTsv, itolColourStrip, itolDomains, eventsTsv } from './export.js';
 import { renderMsa } from './msa.js';
 
 const $ = (id) => document.getElementById(id);
@@ -1382,77 +1383,25 @@ $('svg-download').addEventListener('click', () => {
   download('phylo-fam-fate-tree.svg', new XMLSerializer().serializeToString(svg), 'image/svg+xml');
 });
 
-/** Serialise a tree (with support values) back to Newick. */
-function toNewick(node) {
-  const q = s => /[\s(),:;'\[\]]/.test(s) ? `'${s.replace(/'/g, "''")}'` : s;
-  const walk = n => {
-    const len = n.length ? `:${+n.length.toPrecision(6)}` : '';
-    if (!n.children.length) return q(n.name) + len;
-    return `(${n.children.map(walk).join(',')})${n.support != null ? n.support : ''}${len}`;
-  };
-  return walk(node) + ';';
-}
-
-const tsvCell = v => String(v ?? '').replace(/[\t\n\r]+/g, ' ');
 $('annot-download').addEventListener('click', () => {
   if (!state.tree) return;
-  const rankCols = RANKS.filter(r => r !== 'species');
-  const head = ['label', 'accession', 'species', 'taxid', ...rankCols, 'protein', 'genes', 'length', 'pfam', 'domains', 'function', 'annotation_score', 'source'];
-  const rows = leafNames(state.tree).map(l => {
-    const a = state.annotations.get(l);
-    const doms = leafDomains(l).map(d => `${d.id || d.name}:${d.start}-${d.end}`).join(';');
-    return [l, a?.accession, a?.species, a?.taxid, ...rankCols.map(r => taxonAt(a, r)), a?.protein,
-      a?.genes?.join(' '), a?.length, a?.pfam?.join(';'), doms, a?.func, a?.score, a?.source].map(tsvCell).join('\t');
-  });
-  download('phylo-fam-fate-annotations.tsv', [head.join('\t'), ...rows].join('\n') + '\n', 'text/tab-separated-values');
+  download('phylo-fam-fate-annotations.tsv',
+    annotationsTsv(leafNames(state.tree), state.annotations, leafDomains), 'text/tab-separated-values');
 });
-
-/* iTOL dataset files (https://itol.embl.de/help.cgi#datasets). Leaf IDs must
-   match the Newick labels, so these pair with either Newick export. */
 $('itol-color-download').addEventListener('click', () => {
   if (!state.tree) return;
   const rank = $('tv-color').value || 'phylum';
-  const labels = leafNames(state.tree);
-  const counts = new Map();
-  for (const l of labels) { const g = taxonAt(state.annotations.get(l), rank) || 'unknown'; counts.set(g, (counts.get(g) || 0) + 1); }
-  const { map, sorted } = colourGroups(counts);
-  const col = g => g === 'unknown' ? '#e2e8f0' : map.get(g) || OTHER;
-  const lines = ['DATASET_COLORSTRIP', 'SEPARATOR TAB', `DATASET_LABEL\t${rank}`, 'COLOR\t#2563eb',
-    `LEGEND_TITLE\t${rank}`, `LEGEND_SHAPES\t${sorted.map(() => 1).join('\t')}`,
-    `LEGEND_COLORS\t${sorted.map(([g]) => col(g)).join('\t')}`, `LEGEND_LABELS\t${sorted.map(([g]) => tsvCell(g)).join('\t')}`,
-    'DATA', ...labels.map(l => { const g = taxonAt(state.annotations.get(l), rank) || 'unknown'; return `${l}\t${col(g)}\t${tsvCell(g)}`; })];
-  download(`phylo-fam-fate-itol-${rank}.txt`, lines.join('\n') + '\n');
+  download(`phylo-fam-fate-itol-${rank}.txt`, itolColourStrip(leafNames(state.tree), state.annotations, rank));
 });
 $('itol-domain-download').addEventListener('click', () => {
   if (!state.tree) return;
-  const lines = ['DATASET_DOMAINS', 'SEPARATOR TAB', 'DATASET_LABEL\tPfam domains', 'COLOR\t#6366f1', 'DATA'];
-  let n = 0;
-  for (const l of leafNames(state.tree)) {
-    const doms = leafDomains(l);
-    const len = state.annotations.get(l)?.length || (doms.length ? Math.max(...doms.map(d => d.end)) : 0);
-    if (!len) continue;
-    n++;
-    // SHAPE|START|END|COLOR|LABEL ; RE = rounded rectangle
-    lines.push([l, len, ...doms.map(d => `RE|${d.start}|${d.end}|${domainColour(d.id || d.name)}|${tsvCell(d.name).replace(/\|/g, '/')}`)].join('\t'));
-  }
-  if (!n) { status('No domain data yet: tick “Domains” (or annotate) first', 'error'); return; }
-  download('phylo-fam-fate-itol-domains.txt', lines.join('\n') + '\n');
+  const txt = itolDomains(leafNames(state.tree), state.annotations, leafDomains);
+  if (!txt) { status('No domain data yet: tick “Domains” (or annotate) first', 'error'); return; }
+  download('phylo-fam-fate-itol-domains.txt', txt);
 });
 $('events-download').addEventListener('click', () => {
   if (!state.shownTree || !state.shownEvents) { status('Tick “Duplications” (on a rooted, annotated tree) first', 'error'); return; }
-  const rows = ['node\tevent\tsupport\ttips\tspecies\ttip_names'];
-  let i = 0;
-  const walk = n => {
-    if (!n.children.length) return;
-    if (n.event) {
-      const names = leafNames(n);
-      const sp = new Set(names.map(x => state.annotations.get(x)?.species).filter(Boolean));
-      rows.push([`n${++i}`, n.event === 'dup' ? 'duplication' : 'speciation', n.support ?? '', names.length, [...sp].join('; '), names.join(',')].map(tsvCell).join('\t'));
-    }
-    n.children.forEach(walk);
-  };
-  walk(state.shownTree);
-  download('phylo-fam-fate-events.tsv', rows.join('\n') + '\n', 'text/tab-separated-values');
+  download('phylo-fam-fate-events.tsv', eventsTsv(state.shownTree, state.annotations), 'text/tab-separated-values');
 });
 
 // ---------------------------------------------------------------------------

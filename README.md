@@ -30,7 +30,7 @@ scaled up or scripted on a workstation or cluster.
    - [Step 7 · Annotation: taxonomy, domains, function](#step-7--annotation-taxonomy-domains-function)
    - [Step 8 · Duplications vs speciations](#step-8--duplications-vs-speciations)
    - [Step 9 · Export and provenance](#step-9--export-and-provenance)
-4. [Complete command-line pipeline](#complete-command-line-pipeline)
+4. [Command-line tool: `famfate.sh`](#command-line-tool-famfatesh) (container, Apptainer/Singularity, conda)
 5. [Browser vs command line: choosing](#browser-vs-command-line-choosing)
 6. [Data sources and limits](#data-sources-and-limits)
 7. [Troubleshooting](#troubleshooting)
@@ -41,33 +41,30 @@ scaled up or scripted on a workstation or cluster.
 
 ## Two ways to run it
 
-| | **Browser** (this site) | **Command line** (equivalent tools) |
+| | **Browser** (this site) | **Command line** (`famfate.sh`) |
 |---|---|---|
-| Install | Nothing; open the page | conda/mamba environment (below) |
+| Install | Nothing; open the page | Container (Docker / Apptainer) or conda environment |
 | Compute | Your machine, in WebAssembly (single-threaded) | Native, multi-threaded |
 | Data | Streamed from UniProt into the browser; never uploaded | Downloaded to disk |
 | Best for | Exploring one family; teaching; quick looks; sharing a method | Large families (>1–2k sequences), many proteomes, batch runs, publication runs |
 | Output | SVG, Newick, FASTA, TSV, iTOL files, run-metadata JSON | Same formats |
 
-Tool versions used in the browser (use the same on the CLI to match results):
+Tool versions used in the browser and pinned in the CLI container:
 
-| Step | Tool | Browser version |
-|---|---|---|
-| Search | BLAST+ `blastp` / `blastn`, `makeblastdb`, `blastdbcmd` | 2.17.0 |
-| Search | HMMER `phmmer` | 3.4 |
-| Align | Kalign | 3.3.1 |
-| Align | MUSCLE | 5.1.0 |
-| Trim | built-in (JS); `trimal` is the CLI analogue | — |
-| Tree | FastTree, via [phylo-fasttree-wasm](https://github.com/hyphaltip/phylo-fasttree-wasm) | 2.1.11 |
+| Step | Tool | Browser | CLI container |
+|---|---|---|---|
+| Search | BLAST+ `blastp` / `blastn`, `makeblastdb`, `blastdbcmd` | 2.17.0 | 2.17.0 |
+| Search | HMMER `phmmer` | 3.4 | 3.4 |
+| Align | Kalign | 3.3.1 | 3.3.2 (3.3.1 isn't on bioconda) |
+| Align | MUSCLE | 5.1.0 | 5.1.0 |
+| Trim | site's JS (`js/trim.js`) | — | same code, run by Node |
+| Tree | FastTree, via [phylo-fasttree-wasm](https://github.com/hyphaltip/phylo-fasttree-wasm) | 2.1.11 | 2.1.11 (native); CI checks it against the WASM build |
+| Root / annotate / duplications / export | site's JS (`js/tree.js`, `js/annotate.js`, `js/export.js`) | — | same code, run by Node |
 
-CLI environment, one time:
-
-```sh
-mamba create -n famfate -c conda-forge -c bioconda \
-    blast hmmer kalign3 muscle=5.1 trimal fasttree \
-    seqkit ete3 newick_utils curl jq
-mamba activate famfate
-```
+The command-line tool is described in
+[Command-line tool: `famfate.sh`](#command-line-tool-famfatesh). The
+**CLI equivalent** blocks under each step below show the underlying commands,
+for anyone who wants to run the steps by hand or adapt them.
 
 ---
 
@@ -498,57 +495,178 @@ the analysis with the CLI commands above.
 
 ---
 
-## Complete command-line pipeline
+## Command-line tool: `famfate.sh`
 
-A script equivalent to the default browser run (BLASTP vs Swiss-Prot plus
-proteomes, full-length subjects, Kalign, trimming at 0.5 gaps, FastTree LG+Γ,
-annotation):
+`cli/famfate.sh` runs the whole pipeline in one command, with the browser's
+defaults:
+
+1. Search (BLAST+ or phmmer).
+2. Full-length hits via `blastdbcmd`.
+3. Align with Kalign or MUSCLE.
+4. Trim.
+5. FastTree.
+6. Root.
+7. Annotate from UniProt and InterPro.
+8. Label duplications.
+9. Export.
+
+Steps 4 and 6–9 run the **website's own JavaScript** under Node
+(`cli/famfate-js.mjs` imports `js/trim.js`, `js/tree.js`, `js/annotate.js`
+and `js/export.js`). They produce exactly what the browser would, including
+MAD rooting and the same SVG renderer. The search, alignment and tree steps
+use the native tools at the versions in the table above.
+
+### Get it
+
+**Container** (recommended; linux/amd64), built and tested by CI
+(`.github/workflows/cli-container.yml`) and published to GitHub Container
+Registry:
+
+| Tag | Built from |
+|---|---|
+| `:edge` | the latest `main` |
+| `:sha-<commit>` | every published build |
+| `:X.Y.Z`, `:X.Y`, `:latest` | release tags `vX.Y.Z` |
 
 ```sh
-#!/usr/bin/env bash
-# famfate.sh  QUERY_ACC  "Division/UPID/UPID_TAXID ..."
-set -euo pipefail
-Q=${1:-P46151}                     # UniProt accession of the query
-PROTEOMES=${2:-"Eukaryota/UP000001805/UP000001805_367110 Eukaryota/UP000005640/UP000005640_9606"}
-EVALUE=1e-3; MAXHITS=50; THREADS=8
-UP=https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase
+# Docker: mount the working directory at /data and run as yourself so outputs are yours
+docker run --rm -u "$(id -u):$(id -g)" -v "$PWD":/data \
+    ghcr.io/hyphaltip/phylo-fam-fate-cli:edge famfate.sh -q P46151
 
-curl -s https://rest.uniprot.org/uniprotkb/$Q.fasta > query.fa
-
-dbs=(sprot)
-[ -s sprot.pin ] || { curl -s $UP/complete/uniprot_sprot.fasta.gz | gunzip > sprot.fa
-                      makeblastdb -in sprot.fa -dbtype prot -out sprot -parse_seqids; }
-for p in $PROTEOMES; do
-  n=$(basename $p)
-  [ -s $n.pin ] || { curl -s $UP/reference_proteomes/$p.fasta.gz | gunzip > $n.fa
-                     makeblastdb -in $n.fa -dbtype prot -out $n -parse_seqids; }
-  dbs+=($n)
-done
-
-blastp -query query.fa -db "${dbs[*]}" -seg no -evalue $EVALUE -max_target_seqs $MAXHITS \
-       -num_threads $THREADS \
-       -outfmt '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore sacc slen' \
-       > hits.tsv
-cut -f13 hits.tsv | sort -u > ids.txt
-blastdbcmd -db "${dbs[*]}" -entry_batch ids.txt > hits.fa
-cat query.fa hits.fa | seqkit rmdup -n > family.fa
-
-kalign -i family.fa -o family.aln.fa
-trimal -in family.aln.fa -out family.trim.fa -gt 0.5
-FastTree -lg -gamma family.trim.fa > family.nwk
-
-curl -s -G https://rest.uniprot.org/uniprotkb/accessions \
-  --data-urlencode "accessions=$( (echo $Q; cat ids.txt) | sort -u | paste -sd,)" \
-  --data-urlencode 'fields=accession,organism_name,organism_id,lineage,protein_name,gene_names,length,xref_pfam' \
-  --data-urlencode 'format=tsv' > annotations.tsv
-
-echo "Done: family.nwk ($(grep -c '>' family.fa) sequences), annotations.tsv"
+# Apptainer / Singularity (HPC): pull once into a .sif, then exec
+apptainer pull famfate.sif docker://ghcr.io/hyphaltip/phylo-fam-fate-cli:edge
+apptainer exec famfate.sif famfate.sh -q P46151 -T 8
 ```
 
-The outputs (`family.nwk`, `annotations.tsv`) can be opened in iTOL, or
-analysed with ETE3 as in steps 6–8. Alternatively, load `family.trim.fa` into
-the browser (step 1, then step 5) to use its interactive viewer (rooting,
-colours, domains, duplications) on a CLI-made alignment.
+Under Apptainer the current directory and `$HOME` are bound automatically.
+Downloaded and indexed databases are cached in `--dbdir` (default
+`./famfate_db`, or `$FAMFATE_DB`). On a cluster, point that at shared scratch
+so every job reuses one Swiss-Prot or proteome index:
+
+```sh
+export FAMFATE_DB=/scratch/$USER/famfate_db
+apptainer exec famfate.sif famfate.sh -q P46151 -p UP000001805,UP000005640 -T $SLURM_CPUS_PER_TASK
+```
+
+**Conda** (no container; linux-64 or macOS):
+
+```sh
+git clone https://github.com/hyphaltip/phylo-fam-fate && cd phylo-fam-fate
+mamba env create -f environment.yml && mamba activate famfate
+./cli/famfate.sh -h
+```
+
+**Build the image yourself:**
+`docker build --platform linux/amd64 -t phylo-fam-fate-cli .`. BLAST+ 2.17.0
+has no linux-arm64 build on bioconda, so ARM machines either run the amd64
+image under emulation or use conda on macOS.
+
+### Usage
+
+```text
+famfate.sh (-q ACC | -i QUERY.fa | -f FAMILY.fa | -a ALIGNED.fa) [options]
+
+Input (one of):
+  -q, --query ACC[,ACC…]   UniProt accession(s) of the query protein(s)
+  -i, --query-fasta FILE   query FASTA
+  -f, --family FILE        unaligned family FASTA: skip the search
+  -a, --aligned FILE       aligned FASTA: skip search and alignment
+Search:      -p UPID,UPID…  --no-sprot  --db FILE[,FILE]  -t blastp|blastn|phmmer
+             -e 1e-3 (search E)  -E 1e-5 (keep-hit E)  -n 50  --hsp-only  --no-query
+Align/tree:  -A kalign|muscle  -g 0.5|none  -c 0  -m lg|wag|jtt|nt|gtr  --no-gamma  --fasttree-args "…"
+Post:        -r midpoint|mad|none|outgroup:RANK:NAME  --rank phylum  --no-annotate  --no-domains
+General:     -o OUTDIR  -d DBDIR  -T THREADS  -h  -V
+```
+
+The defaults match the browser:
+- Search: Swiss-Prot, BLASTP, search E-value 1e-3, hits kept at E ≤ 1e-5,
+  50 hits, full-length subjects, query included.
+- Alignment and tree: Kalign; trimming at gap fraction 0.5; FastTree LG with
+  Gamma (`-lg -gamma`).
+- Post-processing: midpoint root; colours and iTOL at phylum.
+
+### Examples
+
+```sh
+# MET12 against Swiss-Prot (the browser's quick-start)
+famfate.sh -q P46151
+
+# Against a set of reference proteomes instead, MUSCLE, MAD rooting
+famfate.sh -q P46151 -p UP000001805,UP000005640,UP000006548,UP000000625 --no-sprot \
+           -A muscle -r mad -o met12_proteomes
+
+# More sensitive search; root on bacteria; colour by class
+famfate.sh -q P46151 -t phmmer -r outgroup:domain:Bacteria --rank class
+
+# You already have the family: align → tree → annotate
+famfate.sh -f my_family.fa -m wag -o myfam
+
+# You already have an alignment (e.g. from MAFFT): tree + annotation only, offline
+famfate.sh -a my_family.aln.fa --no-annotate -r midpoint
+
+# Domain-only tree: matched regions, no trimming
+famfate.sh -q P46151 --hsp-only -g none
+```
+
+### Outputs (in `-o OUTDIR`)
+
+| File | Contents |
+|---|---|
+| `query.fa` | Query sequence(s) |
+| `hits.tsv` | BLAST tabular output, one row per HSP (`sseq`, `sacc`, `slen` columns added) |
+| `best_hsp.tsv`, `subject_ids.txt` | One row / ID per subject protein passing `-E` (the browser's grouped hit table) |
+| `hits.fa`, `hits.summary` | Subject sequences: full-length from `blastdbcmd`, or HSP region where unavailable |
+| `phmmer.tbl` | phmmer per-sequence table (with `-t phmmer`) |
+| `family.fa` | Sequences that were aligned (query + hits, deduplicated by name) |
+| `family.aln.fa`, `family.trim.fa` | Alignment and trimmed alignment |
+| `family.nwk` | FastTree output (unrooted) |
+| `family.rooted.nwk` | Rooted, ladderized tree (the browser's "Newick (rooted, as shown)") |
+| `family.svg` | Tree drawn by the browser's renderer: taxon colours, domain track, duplication markers |
+| `family.annotations.tsv` | One row per leaf: ranks, protein/gene, length, Pfam, domain coordinates, function |
+| `family.itol_<rank>.txt`, `family.itol_domains.txt` | iTOL colour-strip and protein-domain datasets |
+| `family.events.tsv` | Duplication / speciation nodes, with support, tips and species |
+| `family.post.json` | Rooting method and note (e.g. MAD score, outgroup monophyly), counts |
+| `run.json`, `run.log` | Provenance (command, each step's tool, version, parameters, seconds) and full log |
+
+To view or refine the result interactively, open the site, load
+`family.trim.fa` in step 1 and build the tree in step 5.
+
+### `famfate-js`: the website's code as standalone commands
+
+The container also puts `famfate-js` on the PATH:
+
+```sh
+famfate-js trim ALN.fa --gap 0.5 --cons 0 > trimmed.fa         # browser trimming rule
+famfate-js post --tree T.nwk --fasta FAMILY.fa --root mad --out T # root + annotate + duplications + SVG/TSV/iTOL
+famfate-js fasttree-wasm ALN.fa -lg -gamma > tree.nwk             # the browser's FastTree WASM build
+famfate-js compare-trees A.nwk B.nwk --tol 1e-4                  # same unrooted topology? max branch-length difference
+famfate-js seqtype FASTA                                         # nt | aa (the browser's detection rule)
+```
+
+### What CI checks
+
+On every push touching the CLI, JS or container (and on pull requests), the
+workflow builds the image and runs `cli/tests/ci.sh` inside it:
+
+1. **Offline pipeline:** family → Kalign → trim → FastTree, and MUSCLE/WAG
+   without trimming.
+2. **FastTree parity:** native FastTree and the browser's WASM build, on
+   protein and nucleotide alignments with several models. It passes when the
+   Newick is byte-identical, or else when topology is the same and branch
+   lengths are within 1e-3.
+3. **Live search:** MET12 against the *S. cerevisiae* and *E. coli*
+   proteomes. It checks that:
+   - all hits come back full-length;
+   - MET13 and MetF are recovered;
+   - UniProt taxonomy is filled in;
+   - the MET12/MET13 duplication is labelled;
+   - iTOL files are written;
+   - MAD rooting is applied.
+4. **phmmer** with outgroup rooting, and **option errors**.
+5. **Apptainer:** the image is converted to a SIF and run with
+   `apptainer exec`.
+
+The image is pushed only if all of these pass.
 
 ---
 
@@ -565,8 +683,9 @@ colours, domains, duplications) on a CLI-made alignment.
   alignments (MUSCLE `-super5`, MAFFT), ML with bootstrap (IQ-TREE,
   RAxML-NG), reconciliation against a species tree (GeneRax, NOTUNG), or
   anything to be rerun automatically.
-- **Mix them.** Run the heavy search and alignment on the CLI, then load the
-  alignment into the browser for the tree, annotation and duplication view.
+- **Mix them.** Run `famfate.sh` (or just the heavy search and alignment) on
+  a cluster, then load `family.trim.fa` into the browser for the interactive
+  tree, annotation and duplication view.
   Or explore in the browser and copy the parameters from the exported
   metadata JSON into the CLI script.
 
@@ -630,7 +749,12 @@ index.html ── js/app.js              UI, state, pipeline wiring
                ├─ js/msa.js          coloured alignment viewer
                ├─ js/fasttree-worker.js  Web Worker running FastTree WASM (stack-pointer guard on errors)
                ├─ js/tree.js         Newick parser, SVG renderer, midpoint/MAD/outgroup rooting, species-overlap events
-               └─ js/annotate.js     UniProt batch annotation, lineage/domain parsing, InterPro Pfam, palettes
+               ├─ js/annotate.js     UniProt batch annotation, lineage/domain parsing, InterPro Pfam, palettes
+               └─ js/export.js       Newick / annotation TSV / iTOL / events writers (shared with the CLI)
+cli/famfate.sh       command-line pipeline (BLAST+/HMMER/Kalign/MUSCLE/FastTree + famfate-js)
+cli/famfate-js.mjs   runs js/*.js under Node: trim, post (root/annotate/events/SVG), fasttree-wasm, compare-trees
+cli/tests/ci.sh      container tests run by CI
+Dockerfile, environment.yml   pinned CLI toolchain (container / conda)
 assets/fasttree/   FastTree 2.1.11 compiled to wasm32 (from phylo-fasttree-wasm), GPL-2.0
 assets/examples/   example inputs (MET12 query, protein set, nucleotide alignment)
 ```

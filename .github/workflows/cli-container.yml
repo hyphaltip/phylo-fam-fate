@@ -1,0 +1,106 @@
+name: CLI container
+
+# Builds the famfate.sh container, runs the smoke/parity tests inside it (and
+# under Apptainer), then publishes it to GitHub Container Registry:
+#   main      → ghcr.io/<owner>/phylo-fam-fate-cli:edge  (+ :sha-<short>)
+#   tag v1.2.3 → :1.2.3, :1.2, :latest
+# Pull requests build and test but don't push.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - 'cli/**'
+      - 'js/**'
+      - 'assets/fasttree/**'
+      - 'assets/examples/**'
+      - 'environment.yml'
+      - 'Dockerfile'
+      - '.github/workflows/cli-container.yml'
+  pull_request:
+    paths:
+      - 'cli/**'
+      - 'js/**'
+      - 'assets/fasttree/**'
+      - 'environment.yml'
+      - 'Dockerfile'
+      - '.github/workflows/cli-container.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: cli-container-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/phylo-fam-fate-cli
+
+jobs:
+  build-test-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image (local, for testing)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: phylo-fam-fate-cli:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Container tests (pipeline, FastTree native-vs-WASM parity, search, annotation)
+        run: docker run --rm phylo-fam-fate-cli:test bash /opt/phylo-fam-fate/cli/tests/ci.sh
+
+      - name: Install Apptainer
+        uses: eWaterCycle/setup-apptainer@v2
+        with:
+          apptainer-version: 1.3.6
+
+      - name: Apptainer test (exec skips ENTRYPOINT, so PATH must work on its own)
+        run: |
+          apptainer build famfate.sif docker-daemon://phylo-fam-fate-cli:test
+          apptainer exec famfate.sif famfate.sh --version
+          cd "$(mktemp -d)"
+          apptainer exec --pwd "$PWD" "$GITHUB_WORKSPACE/famfate.sif" \
+            famfate.sh --family /opt/phylo-fam-fate/assets/examples/proteins.fa --no-annotate -o out -T 2
+          test -s out/family.nwk && test -s out/run.json && echo "Apptainer run OK"
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=edge,branch=main
+            type=sha,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
