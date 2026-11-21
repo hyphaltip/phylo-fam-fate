@@ -112,10 +112,56 @@ The same numbers appear in the run metadata table and in the exported JSON.
 ### Tree inference and viewer
 FastTree runs in a Web Worker (`js/fasttree-worker.js`), so the page stays
 responsive during long inferences; a live timer and **Cancel** button appear
-while it runs. The tree view supports midpoint rooting, ladderizing, a
-cladogram layout, toggling support values, highlighting tips by name, and
-exporting SVG or Newick. Aligned and trimmed alignments are shown in a
-colored viewer and can be downloaded as FASTA.
+while it runs. The tree view supports ladderizing, a cladogram layout, toggling
+support values and finding tips by ID or species. Aligned and trimmed
+alignments are shown in a colored viewer and can be downloaded as FASTA.
+
+**Rooting** (`js/tree.js`). FastTree trees are unrooted, and every option
+reroots the original tree, so switching between them is lossless. Support
+values move with their bipartition.
+- *Midpoint*: halfway along the longest tip-to-tip path (default).
+- *MAD*, minimal ancestor deviation
+  ([Tria et al. 2017](https://doi.org/10.1038/s41559-017-0193)): picks the
+  root that makes the tree most clock-like across all tip pairs. It copes
+  better than midpoint with uneven rates. The legend reports the deviation and
+  ambiguity (a ratio near 1 means another root is almost as good). O(n³), so it
+  is limited to 900 tips.
+- *Outgroup taxon*: any taxon from the annotations, at any rank. If it isn't
+  monophyletic, the tree is rooted on the split with the fewest tips on the
+  wrong side, and the legend warns how many.
+- *Chosen branch*: click any branch and choose **Root on this branch**.
+
+**Annotation** (`js/annotate.js`). After a tree is built, leaves with UniProt
+accessions (`sp|P46151|…`, `tr|Q7S830|…` or bare accessions) are annotated in
+one batched call to UniProt's `uniprotkb/accessions` endpoint. It returns
+organism, taxid, ranked lineage, protein and gene names, length, Pfam, domain
+features, function and annotation score. Other labels fall back to
+`OS=`/`OX=`/`GN=` in their FASTA description line, which needs no network and
+gives species but no lineage. **Annotate from UniProt** reruns it.
+- *Label*: ID, species, ID + species, gene or protein name.
+- *Colour by*: domain of life, kingdom, phylum, subphylum, class, order,
+  family, genus or species. Each leaf gets a swatch, and a branch is coloured
+  when its whole clade shares one taxon, so a group that isn't a single clade
+  stands out. The legend gives counts. The 12 most frequent groups get
+  distinct colours; the rest are grey.
+- *Click a leaf* for a card with protein and gene, species and lineage, a
+  domain diagram, function text and a UniProt link. *Click a branch* to root
+  on it, highlight its clade, or copy its tip names.
+- *Domains*: Pfam domain architecture to a common scale beside each leaf.
+  Coordinates come from the InterPro API, one request per protein with
+  retries, up to 600 proteins; UniProt's own domain features are the fallback.
+  Fusions, losses and truncated copies stand out next to the tree.
+- *Duplications*: on a rooted, annotated tree, each internal node is labelled
+  with the species-overlap rule: a duplication (red square) if its child
+  clades share a species, otherwise a speciation (blue dot). The legend counts
+  each. Results depend on the rooting, so compare midpoint, MAD and outgroup
+  roots.
+
+**Export** menu: SVG as shown; Newick as inferred (unrooted) or as shown
+(rooted, ladderized); annotations TSV with one row per leaf (ranks, names,
+Pfam, domain coordinates, function); iTOL colour-strip and protein-domain
+datasets that match the Newick labels; and a TSV of duplication and
+speciation nodes with their tips and species.
 
 ### Troubleshooting / debug log
 A **Debug log** panel is pinned (collapsed) to the bottom-right of the page; a
@@ -134,7 +180,8 @@ to run the align step first.
 |---|---|---|
 | [UniProt REST](https://rest.uniprot.org) | Protein sequence search & FASTA retrieval | ~10 req/s |
 | [NCBI E-utilities](https://www.ncbi.nlm.nih.gov/books/NBK25501/) | Nucleotide/protein search & retrieval | 3 req/s (no key) |
-| [InterPro](https://www.ebi.ac.uk/interpro/api/) | Pfam/InterPro family search | fair use |
+| [InterPro](https://www.ebi.ac.uk/interpro/api/) | Pfam/InterPro family search; Pfam domain coordinates for the tree | fair use (503s retried) |
+| [UniProt `uniprotkb/accessions`](https://rest.uniprot.org/docs/) | Batched leaf annotation (≤400 accessions per request) | ~10 req/s |
 
 NCBI BLAST URL API and EBI HMMER web service do **not** send CORS headers, so
 remote BLAST/HMMER requires a proxy (planned).

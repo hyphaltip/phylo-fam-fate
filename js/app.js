@@ -3,7 +3,8 @@
 import { retrieve, parseFasta, toFasta } from './api.js';
 import { runAligner, runBlast, runPhmmer, parseBlastHits, parsePhmmerHits, TOOL_VERSIONS } from './tools.js';
 import { trimAlignment } from './trim.js';
-import { parseNewick, drawTree, treeStats, midpointRoot, ladderize } from './tree.js';
+import { parseNewick, drawTree, treeStats, midpointRoot, ladderize, rootOnOutgroup, madRoot, labelEvents, leafNames } from './tree.js';
+import { annotateLabels, fetchPfamDomains, accessionOf, taxonAt, colourGroups, domainColour, RANKS, OTHER } from './annotate.js';
 import { renderMsa } from './msa.js';
 
 const $ = (id) => document.getElementById(id);
@@ -28,6 +29,13 @@ const state = {
   trimmedFasta: '',   // trimmed alignment
   newick: '',
   tree: null,         // parsed Newick (unrooted, as FastTree wrote it)
+  descs: new Map(),   // sequence name -> FASTA description line (OS=, GN=…)
+  annotations: new Map(), // leaf label -> annotation (annotate.js)
+  pfam: new Map(),    // accession -> Pfam domains (InterPro)
+  rootClade: null,    // Set of leaf names: user-chosen root branch
+  selectedClade: null,// Set of leaf names highlighted in the tree
+  shownTree: null,    // tree as last drawn (rooted/ladderized copy)
+  shownNodes: [],     // node index -> node for click handling
   ftVersion: '',
   records: [],
   metadata: [],
@@ -296,6 +304,8 @@ function showMsa(id, fasta, type) {
 function setRawFasta(fasta, source) {
   state.rawFasta = fasta.trim();
   state.records = parseFasta(state.rawFasta);
+  state.descs = new Map(state.records.filter(r => r.desc).map(r => [r.name, r.desc]));
+  state.annotations = new Map(); state.rootClade = null; state.selectedClade = null;
   state.alignedFasta = '';
   state.trimmedFasta = '';
   state.searchFasta = '';
@@ -418,7 +428,7 @@ function setDbSources(sources, label, note = '') {
   state.dbSources = sources;
   state.dbFasta = '';
   state.dbFastaKey = '';
-  state.dbIndex = null;
+  state.dbIndex = null; state.dbDescs = null;
   state.dbSource = label;
   $('search-db-info').innerHTML =
     `<strong>${escapeHtml(label)}</strong>${note ? ' · ' + escapeHtml(note) : ''} · streamed into Biowasm at search time (nothing uploaded)`;
@@ -429,8 +439,9 @@ const dbReady = () => state.dbSources.length > 0 || !!state.dbFasta;
 
 /** Describe an in-memory DB in the UI. */
 function setSearchDb({ text, records, gzipped, bytes }, source) {
-  state.dbFasta = text;
   state.dbIndex = new Map(records.map(r => [r.name, r.seq]));
+  state.dbDescs = new Map(records.filter(r => r.desc).map(r => [r.name, r.desc]));
+  state.dbFasta = text;
   state.dbSources = [];
   state.dbFastaKey = '';
   state.dbSource = source;
@@ -788,7 +799,7 @@ $('search-run').addEventListener('click', async () => {
         }
         state.dbFasta = texts.map(t => t.trimEnd()).join('\n') + '\n';
         state.dbFastaKey = key; // cache for subsequent phmmer runs
-        state.dbIndex = null;
+        state.dbIndex = null; state.dbDescs = null;
       }
       const dbFasta = state.dbFasta;
       status('Running phmmer locally…');
@@ -797,17 +808,23 @@ $('search-run').addEventListener('click', async () => {
       // phmmer does not report sequences; recover them from the in-memory DB.
       state.dbIndex ||= new Map(parseFasta(dbFasta).map(r => [r.name, r.seq]));
       hits.forEach(h => { h.seq = h.fullSeq = state.dbIndex.get(h.name) || ''; });
+      if (!state.dbDescs) state.dbDescs = new Map(parseFasta(dbFasta).filter(r => r.desc).map(r => [r.name, r.desc]));
+      hits.forEach(h => { const d = state.dbDescs.get(h.name); if (d) state.descs.set(h.name, d); });
       $('search-preview').textContent = out.slice(0, 3000);
     } else {
       // BLAST embeds full subject sequences (sseq) in its tabular output.
       const sources = state.dbSources.length
         ? state.dbSources
         : [{ data: state.dbFasta, label: state.dbSource }];
-      const { text: out, sequences, full } = await runBlast(tool, state.rawFasta, sources, maxHits, msg => status(msg), searchE);
+      const { text: out, sequences, full, titles } = await runBlast(tool, state.rawFasta, sources, maxHits, msg => status(msg), searchE);
       debugLog(`BLAST searched ${sources.length} database(s)${sequences != null ? `, ${sequences.toLocaleString()} sequences` : ''}: ` +
         sources.map(x => x.label).join('; '));
       hits = parseBlastHits(out);
-      for (const h of hits) h.fullSeq = full.get(h.acc) || full.get(h.name) || '';
+      for (const h of hits) {
+        h.fullSeq = full.get(h.acc) || full.get(h.name) || '';
+        const title = titles.get(h.acc) || titles.get(h.name);
+        if (title) state.descs.set(h.name, title);
+      }
       const nFull = new Set(hits.filter(h => h.fullSeq).map(h => h.name)).size;
       const nSubj = new Set(hits.map(h => h.name)).size;
       debugLog(`Full-length sequences retrieved for ${nFull}/${nSubj} subjects (blastdbcmd)`);
@@ -953,24 +970,296 @@ $('trim-run').addEventListener('click', () => {
 // ---------------------------------------------------------------------------
 // STEP 5: Tree
 // ---------------------------------------------------------------------------
+// Rooting is stored as a leaf-name split, which identifies an edge in any
+// orientation of the same tree, so it survives re-rendering from the
+// unrooted original.
+let madCache = null;   // {tree: state.tree, result}
+function rootedTree() {
+  const t = structuredClone(state.tree);
+  const mode = $('tv-root').value;
+  $('tv-outgroup').classList.toggle('hidden', mode !== 'outgroup');
+  if (mode === 'none') return { t, note: 'unrooted (as inferred)' };
+  if (mode === 'branch' && state.rootClade) {
+    const r = rootOnOutgroup(t, state.rootClade);
+    return { t: r.tree, note: `rooted on chosen branch (${state.rootClade.size} tips)` };
+  }
+  if (mode === 'outgroup') {
+    const taxon = $('tv-outgroup').value;
+    const [rank, name] = taxon.split('\t');
+    if (!name) return { t: midpointRoot(t), note: 'choose an outgroup taxon (annotate first) — midpoint shown' };
+    const set = new Set(leafNames(t).filter(l => taxonAt(state.annotations.get(l), rank) === name));
+    const r = rootOnOutgroup(t, set);
+    if (r.invalid) return { t: midpointRoot(t), note: `${name} covers ${set.size ? 'every' : 'no'} leaf — midpoint shown` };
+    return { t: r.tree, note: r.exact ? `rooted on ${name} (${set.size} tips, monophyletic)`
+      : `⚠ ${name} is not monophyletic: rooted on the best split (${r.impurity} tip${r.impurity === 1 ? '' : 's'} on the wrong side)` };
+  }
+  if (mode === 'mad') {
+    if (madCache?.tree !== state.tree) madCache = { tree: state.tree, result: madRoot(state.tree) };
+    const r = madCache.result;
+    if (!r) return { t: midpointRoot(t), note: 'MAD needs 3–900 tips — midpoint shown' };
+    return { t: structuredClone(r.tree), note: `MAD root (deviation ${r.score.toFixed(3)}, ambiguity ${r.ambiguity.toFixed(2)}${r.ambiguity > 0.95 ? ' — nearly tied with another root' : ''})` };
+  }
+  return { t: midpointRoot(t), note: 'midpoint root' };
+}
+
+const ann = leaf => state.annotations.get(leaf.name);
+function leafText(leaf) {
+  const a = ann(leaf);
+  switch ($('tv-label').value) {
+    case 'species': return a?.species || leaf.name;
+    case 'id-species': return a?.species ? `${leaf.name} ${a.species}` : leaf.name;
+    case 'gene': return a?.genes?.[0] ? `${a.genes[0]} (${a.species || leaf.name})` : leaf.name;
+    case 'protein': return a?.protein ? `${a.protein} · ${a.species || ''}` : leaf.name;
+    default: return leaf.name;
+  }
+}
+
+/** Domain list for a leaf: InterPro Pfam if fetched, else UniProt features. */
+function leafDomains(name) {
+  const a = state.annotations.get(name);
+  const acc = a?.accession || accessionOf(name);
+  const pf = state.pfam.get(acc);
+  return pf?.length ? pf : a?.domains || [];
+}
+
 function renderTree() {
   if (!state.tree) return;
-  // Re-root/ladderize a fresh copy so toggles are reversible
-  let t = structuredClone(state.tree);
-  if ($('tv-midpoint').checked) t = midpointRoot(t);
+  const { t, note } = rootedTree();
   if ($('tv-ladderize').checked) ladderize(t);
-  const { matches } = drawTree($('tree-svg'), t, {
+  const rooted = $('tv-root').value !== 'none';
+
+  // Colour groups at the chosen rank
+  const rank = $('tv-color').value;
+  let colourOf = null, legend = '';
+  if (rank && state.annotations.size) {
+    const counts = new Map();
+    for (const l of leafNames(t)) {
+      const g = taxonAt(state.annotations.get(l), rank) || 'unknown';
+      counts.set(g, (counts.get(g) || 0) + 1);
+    }
+    const { map, sorted } = colourGroups(counts);
+    map.set('unknown', null);
+    colourOf = leaf => map.get(taxonAt(ann(leaf), rank) || 'unknown') || null;
+    legend = `<strong>${escapeHtml(rank)}</strong>` + sorted.map(([g, n]) =>
+      `<span class="lg-item"><i style="background:${g === 'unknown' ? '#e2e8f0' : map.get(g) || OTHER}"></i>${escapeHtml(g)} <small>${n}</small></span>`).join('');
+  }
+
+  // Duplication / speciation labels (needs a rooted tree and species)
+  let events = null;
+  if ($('tv-events').checked) {
+    if (!rooted) legend += '<span class="lg-note">Duplications need a rooted tree.</span>';
+    else if (!state.annotations.size) legend += '<span class="lg-note">Duplications need species: click “Annotate from UniProt”.</span>';
+    else {
+      events = labelEvents(t, leaf => ann(leaf)?.taxid || ann(leaf)?.species || null);
+      legend += `<span class="lg-item"><i class="lg-dup"></i>duplication <small>${events.dup}</small></span>` +
+        `<span class="lg-item"><i class="lg-spec"></i>speciation <small>${events.spec}</small></span>`;
+    }
+  }
+
+  const showDomains = $('tv-domains').checked;
+  const domainKeys = new Map();
+  const { matches, nodes } = drawTree($('tree-svg'), t, {
     showSupport: $('tv-support').checked && !$('tree-nosupport').checked,
     cladogram: $('tv-cladogram').checked,
     highlight: $('tv-find').value,
+    leafText,
+    leafColor: colourOf,
+    showEvents: !!events,
+    selected: state.selectedClade ? n => n.children.length && sameSet(leafNames(n), state.selectedClade) : null,
+    domains: showDomains ? leaf => {
+      const doms = leafDomains(leaf.name);
+      const len = ann(leaf)?.length || (doms.length ? Math.max(...doms.map(d => d.end)) : 0);
+      if (!len) return null;
+      return { len, doms: doms.map(d => {
+        const key = d.id || d.name;
+        domainKeys.set(key, d.name);
+        return { ...d, color: domainColour(key), label: `${d.name}${d.id ? ` (${d.id})` : ''}` };
+      }) };
+    } : null,
   });
+  if (showDomains && domainKeys.size) {
+    legend += '<strong>domains</strong>' + [...domainKeys].map(([k, n]) =>
+      `<span class="lg-item"><i style="background:${domainColour(k)}"></i>${escapeHtml(trunc(n, 34))}${k !== n ? ` <small>${escapeHtml(k)}</small>` : ''}</span>`).join('');
+  }
+  state.shownTree = t;
+  state.shownNodes = nodes;
+  state.shownEvents = events;
+  $('tree-legend').innerHTML = `<span class="lg-note">${escapeHtml(note)}</span>` + legend;
+  $('tree-legend').classList.remove('hidden');
   const q = $('tv-find').value.trim();
   $('tv-find-count').textContent = q ? `${matches} match${matches === 1 ? '' : 'es'}` : '';
 }
-['tv-midpoint', 'tv-ladderize', 'tv-cladogram', 'tv-support'].forEach(id => $(id).addEventListener('change', renderTree));
+function sameSet(arr, set) { return arr.length === set.size && arr.every(x => set.has(x)); }
+
+['tv-root', 'tv-outgroup', 'tv-ladderize', 'tv-cladogram', 'tv-support', 'tv-label', 'tv-color', 'tv-events']
+  .forEach(id => $(id).addEventListener('change', () => { hidePopup(); renderTree(); }));
 $('tv-find').addEventListener('input', renderTree);
 let resizeTimer = 0;
 window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderTree, 150); });
+
+// --- Annotation --------------------------------------------------------------
+async function annotateTree({ quiet = false } = {}) {
+  if (!state.tree) return;
+  const labels = leafNames(state.tree);
+  const btn = $('tv-annotate');
+  btn.disabled = true;
+  const t0 = performance.now();
+  try {
+    const say = m => { $('tv-annot-status').textContent = m; };
+    say('Annotating…');
+    state.annotations = await annotateLabels(labels, state.descs, say);
+    const n = state.annotations.size;
+    const withLineage = [...state.annotations.values()].filter(a => a.lineage.length).length;
+    say(`${n}/${labels.length} leaves annotated${withLineage < n ? ` (${n - withLineage} from FASTA headers, species only)` : ''}`);
+    populateOutgroups();
+    if (n && !$('tv-color').value) $('tv-color').value = withLineage ? 'phylum' : 'genus';
+    recordMeta('Annotate', 'UniProt REST', 'uniprotkb/accessions', 'organism, lineage, names, Pfam, domains, function',
+      `${labels.length} leaves`, `${n} annotated`, performance.now() - t0);
+    debugLog(`Annotated ${n}/${labels.length} leaves (${withLineage} with lineage)`);
+    if ($('tv-domains').checked) await loadDomains();
+    renderTree();
+  } catch (e) {
+    $('tv-annot-status').textContent = `Annotation failed: ${e.message}`;
+    if (!quiet) status(`Annotation failed: ${e.message}`, 'error');
+    debugLog(`Annotation failed: ${e.stack || e}`, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+$('tv-annotate').addEventListener('click', () => annotateTree());
+
+async function loadDomains() {
+  if (!state.tree) return;
+  const accs = leafNames(state.tree).map(l => state.annotations.get(l)?.accession || accessionOf(l)).filter(Boolean);
+  if (!accs.length) { $('tv-annot-status').textContent = 'No UniProt accessions: domain track unavailable'; return; }
+  if (accs.length > 600) { $('tv-annot-status').textContent = `${accs.length} proteins: using UniProt domain features only (InterPro limited to 600)`; return; }
+  const t0 = performance.now();
+  const got = await fetchPfamDomains(accs, m => { $('tv-annot-status').textContent = m; });
+  for (const [a, d] of got) state.pfam.set(a, d);
+  $('tv-annot-status').textContent = `Pfam domains for ${got.size}/${accs.length} proteins (InterPro)`;
+  recordMeta('Domains', 'InterPro API', 'entry/pfam', 'Pfam per protein', `${accs.length} proteins`, `${got.size} with data`, performance.now() - t0);
+}
+$('tv-domains').addEventListener('change', async () => {
+  if ($('tv-domains').checked) {
+    if (!state.annotations.size) await annotateTree();
+    else await loadDomains();
+  }
+  renderTree();
+});
+
+function populateOutgroups() {
+  const sel = $('tv-outgroup');
+  const prev = sel.value;
+  const opts = [];
+  const labels = leafNames(state.tree);
+  for (const rank of RANKS) {
+    const counts = new Map();
+    for (const l of labels) {
+      const g = taxonAt(state.annotations.get(l), rank);
+      if (g) counts.set(g, (counts.get(g) || 0) + 1);
+    }
+    // An outgroup must leave something on the other side.
+    const usable = [...counts].filter(([, c]) => c < labels.length).sort((a, b) => b[1] - a[1]);
+    if (usable.length) opts.push(`<optgroup label="${escapeAttr(rank)}">` + usable.map(([g, c]) =>
+      `<option value="${escapeAttr(`${rank}\t${g}`)}">${escapeHtml(g)} (${c})</option>`).join('') + '</optgroup>');
+  }
+  sel.innerHTML = opts.length ? `<option value="">— choose taxon —</option>${opts.join('')}` : '<option value="">annotate first</option>';
+  if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+}
+
+// --- Click: leaf details / branch actions -----------------------------------
+function hidePopup() { $('tree-popup').classList.add('hidden'); }
+function showPopup(html, evt) {
+  const pop = $('tree-popup'), box = $('tree-scroll');
+  pop.innerHTML = `<button class="popup-close" type="button" aria-label="Close">×</button>${html}`;
+  pop.classList.remove('hidden');
+  const r = box.getBoundingClientRect();
+  let x = evt.clientX - r.left + box.scrollLeft + 12, y = evt.clientY - r.top + box.scrollTop + 12;
+  const w = pop.offsetWidth, h = pop.offsetHeight;
+  if (x + w > box.scrollLeft + box.clientWidth - 8) x = Math.max(box.scrollLeft + 8, evt.clientX - r.left + box.scrollLeft - w - 12);
+  if (y + h > box.scrollTop + box.clientHeight - 8) y = Math.max(box.scrollTop + 8, box.scrollTop + box.clientHeight - h - 8);
+  pop.style.left = `${x}px`; pop.style.top = `${y}px`;
+}
+
+function domainSvg(len, doms) {
+  if (!len) return '';
+  const W = 300, sx = W / len;
+  const rects = doms.map(d => `<rect x="${((d.start - 1) * sx).toFixed(1)}" y="3" width="${Math.max(2, (d.end - d.start + 1) * sx).toFixed(1)}" height="12" rx="3" fill="${domainColour(d.id || d.name)}"><title>${escapeHtml(`${d.name} ${d.start}–${d.end}`)}</title></rect>`).join('');
+  return `<svg class="pop-domains" viewBox="0 0 ${W} 30" width="${W}" height="30"><line x1="0" y1="9" x2="${W}" y2="9" stroke="#94a3b8" stroke-width="2"/>${rects}<text x="0" y="28" font-size="9" fill="#64748b">1</text><text x="${W}" y="28" font-size="9" fill="#64748b" text-anchor="end">${len} aa</text></svg>`;
+}
+
+async function leafPopup(leaf, evt) {
+  const a = ann(leaf);
+  const acc = a?.accession || accessionOf(leaf.name);
+  const render = () => {
+    const doms = leafDomains(leaf.name);
+    const lineage = a?.lineage?.length
+      ? a.lineage.filter(x => RANKS.includes(x.rank) && x.rank !== 'species').map(x => `<span title="${escapeAttr(x.rank)}">${escapeHtml(x.name)}</span>`).join(' › ')
+      : '';
+    showPopup(`
+      <div class="pop-title">${escapeHtml(a?.protein || leaf.name)}</div>
+      <div class="pop-sub">${escapeHtml(leaf.name)}${a?.genes?.length ? ` · gene <b>${escapeHtml(a.genes.slice(0, 3).join(', '))}</b>` : ''}</div>
+      ${a ? `<div class="pop-species"><i>${escapeHtml(a.species || a.organism)}</i>${a.taxid ? ` <small>taxid ${escapeHtml(a.taxid)}</small>` : ''}</div>` : '<p class="hint">No annotation for this leaf. Click “Annotate from UniProt”, or label leaves with UniProt accessions.</p>'}
+      ${lineage ? `<div class="pop-lineage">${lineage}</div>` : ''}
+      ${doms.length || a?.length ? `<div class="pop-sec">Domains${state.pfam.get(acc)?.length ? ' (Pfam via InterPro)' : a?.domains?.length ? ' (UniProt)' : ''}</div>${domainSvg(a?.length || Math.max(0, ...doms.map(d => d.end)), doms)}
+        <div class="pop-domlist">${doms.map(d => `<span><i style="background:${domainColour(d.id || d.name)}"></i>${escapeHtml(d.name)} ${d.start}–${d.end}</span>`).join('') || '<span class="hint">none reported</span>'}</div>` : ''}
+      ${a?.pfam?.length && !doms.length ? `<div class="pop-sec">Pfam</div><div>${a.pfam.map(escapeHtml).join(', ')}</div>` : ''}
+      ${a?.func ? `<div class="pop-sec">Function</div><div class="pop-func">${escapeHtml(trunc(a.func, 600))}</div>` : ''}
+      <div class="pop-foot">${a?.score != null ? `Annotation score ${a.score}/5 · ` : ''}${a?.source ? `${escapeHtml(a.source)} · ` : ''}${acc ? `<a href="https://www.uniprot.org/uniprotkb/${encodeURIComponent(acc)}/entry" target="_blank" rel="noopener">UniProt ${escapeHtml(acc)} ↗</a>` : ''}</div>`, evt);
+  };
+  render();
+  // Fetch this protein's Pfam domains on demand if not already loaded.
+  if (acc && !state.pfam.has(acc)) {
+    const got = await fetchPfamDomains([acc]);
+    if (got.has(acc)) { state.pfam.set(acc, got.get(acc)); if (!$('tree-popup').classList.contains('hidden')) render(); }
+  }
+}
+
+function branchPopup(node, evt) {
+  const names = leafNames(node);
+  const species = new Set(names.map(n => state.annotations.get(n)?.species).filter(Boolean));
+  const ev = node.event === 'dup' ? 'Duplication node' : node.event === 'spec' ? 'Speciation node' : '';
+  showPopup(`
+    <div class="pop-title">Clade of ${names.length} tip${names.length === 1 ? '' : 's'}</div>
+    <div class="pop-sub">${node.support != null ? `support ${node.support} · ` : ''}branch length ${(+node.length).toPrecision(3)}${ev ? ` · <b>${ev}</b>` : ''}</div>
+    ${species.size ? `<div class="pop-species">${species.size} species: <i>${[...species].slice(0, 6).map(escapeHtml).join(', ')}${species.size > 6 ? '…' : ''}</i></div>` : ''}
+    <div class="pop-actions">
+      <button class="btn small primary" type="button" data-act="root">Root on this branch</button>
+      <button class="btn small" type="button" data-act="select">${state.selectedClade && sameSet(names, state.selectedClade) ? 'Clear highlight' : 'Highlight clade'}</button>
+      <button class="btn small ghost" type="button" data-act="names">Copy tip names</button>
+    </div>`, evt);
+  $('tree-popup').dataset.clade = JSON.stringify(names);
+}
+
+$('tree-svg').addEventListener('click', e => {
+  const el = e.target.closest('[data-n]');
+  if (!el) { hidePopup(); return; }
+  const node = state.shownNodes[+el.dataset.n];
+  if (!node) return;
+  if (!node.children.length && !el.classList.contains('t-hitarea')) leafPopup(node, e);
+  else branchPopup(node, e);
+});
+$('tree-popup').addEventListener('click', async e => {
+  if (e.target.closest('.popup-close')) { hidePopup(); return; }
+  const act = e.target.closest('[data-act]')?.dataset.act;
+  if (!act) return;
+  const names = JSON.parse($('tree-popup').dataset.clade || '[]');
+  if (act === 'root') {
+    state.rootClade = new Set(names);
+    const opt = $('tv-root').querySelector('option[value="branch"]');
+    opt.disabled = false;
+    $('tv-root').value = 'branch';
+  } else if (act === 'select') {
+    state.selectedClade = state.selectedClade && sameSet(names, state.selectedClade) ? null : new Set(names);
+  } else if (act === 'names') {
+    try { await navigator.clipboard.writeText(names.join('\n')); status(`Copied ${names.length} tip names`, 'success'); }
+    catch { status('Clipboard access denied', 'error'); }
+    return;
+  }
+  hidePopup();
+  renderTree();
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') hidePopup(); });
 
 function syncModelControls() {
   const model = $('tree-model').value;
@@ -1038,9 +1327,20 @@ $('tree-run').addEventListener('click', async () => {
     state.newick = newick;
     state.tree = parseNewick(newick);
     const stats = treeStats(state.tree);
+    // A new tree invalidates branch-based choices from the previous one.
+    state.rootClade = null; state.selectedClade = null; madCache = null;
+    $('tv-root').querySelector('option[value="branch"]').disabled = true;
+    if ($('tv-root').value === 'branch') $('tv-root').value = 'midpoint';
+    hidePopup();
     $('newick-output').textContent = newick;
     $('tree-results').classList.remove('hidden');
     renderTree();
+    // Annotate automatically when leaves look like UniProt records or carry
+    // OS= descriptions; keep any annotations already fetched for these labels.
+    const labels = stats.names;
+    if (labels.some(l => accessionOf(l) || /\bOS=/.test(state.descs.get(l) || ''))) {
+      if (!labels.every(l => state.annotations.has(l))) annotateTree({ quiet: true });
+    }
     stepStatus('tree', `${stats.tips} tips`, 'done');
     recordMeta('Tree', 'FastTree', state.ftVersion, args.join(' ') || '(defaults)',
       `${recs.length} × ${lengths[0]} ${source} alignment`, `tree, ${stats.tips} tips`, ms);
@@ -1072,10 +1372,87 @@ $('newick-copy').addEventListener('click', async () => {
   }
 });
 $('newick-download').addEventListener('click', () => download('phylo-fam-fate-tree.nwk', state.newick + '\n'));
+$('newick-shown-download').addEventListener('click', () => {
+  if (!state.shownTree) return;
+  download('phylo-fam-fate-tree.rooted.nwk', toNewick(state.shownTree) + '\n');
+});
 $('svg-download').addEventListener('click', () => {
   const svg = $('tree-svg').cloneNode(true);
   svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
   download('phylo-fam-fate-tree.svg', new XMLSerializer().serializeToString(svg), 'image/svg+xml');
+});
+
+/** Serialise a tree (with support values) back to Newick. */
+function toNewick(node) {
+  const q = s => /[\s(),:;'\[\]]/.test(s) ? `'${s.replace(/'/g, "''")}'` : s;
+  const walk = n => {
+    const len = n.length ? `:${+n.length.toPrecision(6)}` : '';
+    if (!n.children.length) return q(n.name) + len;
+    return `(${n.children.map(walk).join(',')})${n.support != null ? n.support : ''}${len}`;
+  };
+  return walk(node) + ';';
+}
+
+const tsvCell = v => String(v ?? '').replace(/[\t\n\r]+/g, ' ');
+$('annot-download').addEventListener('click', () => {
+  if (!state.tree) return;
+  const rankCols = RANKS.filter(r => r !== 'species');
+  const head = ['label', 'accession', 'species', 'taxid', ...rankCols, 'protein', 'genes', 'length', 'pfam', 'domains', 'function', 'annotation_score', 'source'];
+  const rows = leafNames(state.tree).map(l => {
+    const a = state.annotations.get(l);
+    const doms = leafDomains(l).map(d => `${d.id || d.name}:${d.start}-${d.end}`).join(';');
+    return [l, a?.accession, a?.species, a?.taxid, ...rankCols.map(r => taxonAt(a, r)), a?.protein,
+      a?.genes?.join(' '), a?.length, a?.pfam?.join(';'), doms, a?.func, a?.score, a?.source].map(tsvCell).join('\t');
+  });
+  download('phylo-fam-fate-annotations.tsv', [head.join('\t'), ...rows].join('\n') + '\n', 'text/tab-separated-values');
+});
+
+/* iTOL dataset files (https://itol.embl.de/help.cgi#datasets). Leaf IDs must
+   match the Newick labels, so these pair with either Newick export. */
+$('itol-color-download').addEventListener('click', () => {
+  if (!state.tree) return;
+  const rank = $('tv-color').value || 'phylum';
+  const labels = leafNames(state.tree);
+  const counts = new Map();
+  for (const l of labels) { const g = taxonAt(state.annotations.get(l), rank) || 'unknown'; counts.set(g, (counts.get(g) || 0) + 1); }
+  const { map, sorted } = colourGroups(counts);
+  const col = g => g === 'unknown' ? '#e2e8f0' : map.get(g) || OTHER;
+  const lines = ['DATASET_COLORSTRIP', 'SEPARATOR TAB', `DATASET_LABEL\t${rank}`, 'COLOR\t#2563eb',
+    `LEGEND_TITLE\t${rank}`, `LEGEND_SHAPES\t${sorted.map(() => 1).join('\t')}`,
+    `LEGEND_COLORS\t${sorted.map(([g]) => col(g)).join('\t')}`, `LEGEND_LABELS\t${sorted.map(([g]) => tsvCell(g)).join('\t')}`,
+    'DATA', ...labels.map(l => { const g = taxonAt(state.annotations.get(l), rank) || 'unknown'; return `${l}\t${col(g)}\t${tsvCell(g)}`; })];
+  download(`phylo-fam-fate-itol-${rank}.txt`, lines.join('\n') + '\n');
+});
+$('itol-domain-download').addEventListener('click', () => {
+  if (!state.tree) return;
+  const lines = ['DATASET_DOMAINS', 'SEPARATOR TAB', 'DATASET_LABEL\tPfam domains', 'COLOR\t#6366f1', 'DATA'];
+  let n = 0;
+  for (const l of leafNames(state.tree)) {
+    const doms = leafDomains(l);
+    const len = state.annotations.get(l)?.length || (doms.length ? Math.max(...doms.map(d => d.end)) : 0);
+    if (!len) continue;
+    n++;
+    // SHAPE|START|END|COLOR|LABEL ; RE = rounded rectangle
+    lines.push([l, len, ...doms.map(d => `RE|${d.start}|${d.end}|${domainColour(d.id || d.name)}|${tsvCell(d.name).replace(/\|/g, '/')}`)].join('\t'));
+  }
+  if (!n) { status('No domain data yet: tick “Domains” (or annotate) first', 'error'); return; }
+  download('phylo-fam-fate-itol-domains.txt', lines.join('\n') + '\n');
+});
+$('events-download').addEventListener('click', () => {
+  if (!state.shownTree || !state.shownEvents) { status('Tick “Duplications” (on a rooted, annotated tree) first', 'error'); return; }
+  const rows = ['node\tevent\tsupport\ttips\tspecies\ttip_names'];
+  let i = 0;
+  const walk = n => {
+    if (!n.children.length) return;
+    if (n.event) {
+      const names = leafNames(n);
+      const sp = new Set(names.map(x => state.annotations.get(x)?.species).filter(Boolean));
+      rows.push([`n${++i}`, n.event === 'dup' ? 'duplication' : 'speciation', n.support ?? '', names.length, [...sp].join('; '), names.join(',')].map(tsvCell).join('\t'));
+    }
+    n.children.forEach(walk);
+  };
+  walk(state.shownTree);
+  download('phylo-fam-fate-events.tsv', rows.join('\n') + '\n', 'text/tab-separated-values');
 });
 
 // ---------------------------------------------------------------------------

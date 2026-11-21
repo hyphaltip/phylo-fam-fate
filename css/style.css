@@ -220,3 +220,39 @@ footer a { color: var(--primary); }
 .hsp-toggle { margin-left: 0.4rem; padding: 0.05rem 0.4rem; font: inherit; font-size: 0.7rem; border: 1px solid var(--border); border-radius: 999px; background: #eef2ff; color: #3730a3; cursor: pointer; }
 .hsp-toggle:hover { background: #e0e7ff; }
 .hsp-only { margin-left: 0.3rem; padding: 0 0.35rem; border-radius: 999px; font-size: 0.68rem; background: #fef3c7; color: #92400e; }
+
+/* Tree annotation toolbar, legend, popup, export menu */
+.tree-toolbar-2 { border-top: 1px dashed var(--border); border-radius: 0; }
+.tree-toolbar label select { margin-left: 0.3rem; }
+.tree-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.9rem; padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border); border-top: none; background: #fcfcfd; font-size: 0.8rem; }
+.tree-legend strong { text-transform: capitalize; color: var(--muted); font-size: 0.72rem; letter-spacing: 0.03em; }
+.tree-legend .lg-item { display: inline-flex; align-items: center; gap: 0.3rem; }
+.tree-legend .lg-item i { width: 0.8rem; height: 0.8rem; border-radius: 3px; display: inline-block; }
+.tree-legend .lg-item small { color: var(--muted); }
+.tree-legend .lg-note { color: var(--muted); font-style: italic; }
+.tree-legend i.lg-dup { background: #dc2626; border-radius: 1px; }
+.tree-legend i.lg-spec { background: #2563eb; border-radius: 50%; }
+.tree-scroll { position: relative; }
+.tree-popup { position: absolute; z-index: 5; width: min(24rem, calc(100% - 16px)); max-height: 26rem; overflow: auto;
+  background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem 0.9rem;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.18); font-size: 0.84rem; line-height: 1.4; }
+.popup-close { position: absolute; top: 0.3rem; right: 0.4rem; border: none; background: none; font-size: 1.2rem; cursor: pointer; color: var(--muted); }
+.pop-title { font-weight: 600; padding-right: 1.2rem; }
+.pop-sub { color: var(--muted); font-family: var(--mono); font-size: 0.75rem; word-break: break-all; }
+.pop-species { margin-top: 0.35rem; }
+.pop-lineage { margin-top: 0.2rem; font-size: 0.75rem; color: var(--muted); }
+.pop-sec { margin-top: 0.6rem; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+.pop-domains { display: block; max-width: 100%; height: auto; margin-top: 0.2rem; }
+.pop-domlist { display: flex; flex-direction: column; gap: 0.1rem; font-size: 0.76rem; }
+.pop-domlist i { display: inline-block; width: 0.7rem; height: 0.7rem; border-radius: 2px; margin-right: 0.35rem; vertical-align: -1px; }
+.pop-func { font-size: 0.78rem; }
+.pop-foot { margin-top: 0.6rem; font-size: 0.72rem; color: var(--muted); }
+.pop-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.6rem; }
+.export-menu { position: relative; }
+.export-menu > summary { list-style: none; cursor: pointer; }
+.export-menu > summary::-webkit-details-marker { display: none; }
+.export-list { position: absolute; right: 0; top: calc(100% + 4px); z-index: 6; display: flex; flex-direction: column; align-items: stretch;
+  min-width: 16rem; padding: 0.35rem; background: var(--card); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.15); }
+.export-list .btn { text-align: left; }
+#tv-outgroup { max-width: 16rem; }

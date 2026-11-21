@@ -276,18 +276,71 @@
       <p class="hint" id="tree-input-note">The tree uses the most processed data available: trimmed → aligned → input.</p>
       <div id="tree-results" class="hidden">
         <div class="tree-toolbar">
-          <label class="checkbox inline"><input type="checkbox" id="tv-midpoint" checked> Midpoint root</label>
+          <label>Root
+            <select id="tv-root">
+              <option value="midpoint" selected>Midpoint</option>
+              <option value="mad">MAD (min. ancestor deviation)</option>
+              <option value="outgroup">Outgroup taxon…</option>
+              <option value="branch" disabled>Chosen branch</option>
+              <option value="none">As inferred (unrooted)</option>
+            </select>
+          </label>
+          <select id="tv-outgroup" class="hidden" aria-label="Outgroup taxon"></select>
           <label class="checkbox inline"><input type="checkbox" id="tv-ladderize" checked> Ladderize</label>
           <label class="checkbox inline"><input type="checkbox" id="tv-cladogram"> Cladogram</label>
-          <label class="checkbox inline"><input type="checkbox" id="tv-support" checked> Support values</label>
-          <input type="search" id="tv-find" placeholder="Find tip…" aria-label="Find tip">
+          <label class="checkbox inline"><input type="checkbox" id="tv-support" checked> Support</label>
+          <input type="search" id="tv-find" placeholder="Find tip / species…" aria-label="Find tip">
           <span class="hint" id="tv-find-count"></span>
-          <span class="spacer"></span>
-          <button class="btn small ghost" id="svg-download" type="button">SVG</button>
-          <button class="btn small ghost" id="newick-download" type="button">Newick</button>
-          <button class="btn small ghost" id="newick-copy" type="button">Copy Newick</button>
         </div>
-        <div class="tree-scroll"><svg id="tree-svg" xmlns="http://www.w3.org/2000/svg"></svg></div>
+        <div class="tree-toolbar tree-toolbar-2">
+          <button class="btn small" id="tv-annotate" type="button" title="Fetch species, taxonomy, names and function from UniProt for every leaf with a UniProt accession">Annotate from UniProt</button>
+          <label>Label
+            <select id="tv-label">
+              <option value="id">ID</option>
+              <option value="species">Species</option>
+              <option value="id-species">ID + species</option>
+              <option value="gene">Gene / ID</option>
+              <option value="protein">Protein name</option>
+            </select>
+          </label>
+          <label>Colour by
+            <select id="tv-color">
+              <option value="">None</option>
+              <option value="domain">Domain of life</option>
+              <option value="kingdom">Kingdom</option>
+              <option value="phylum">Phylum</option>
+              <option value="subphylum">Subphylum</option>
+              <option value="class">Class</option>
+              <option value="order">Order</option>
+              <option value="family">Family</option>
+              <option value="genus">Genus</option>
+              <option value="species">Species</option>
+            </select>
+          </label>
+          <label class="checkbox inline" title="Pfam domain architecture from InterPro, drawn to scale beside each leaf"><input type="checkbox" id="tv-domains"> Domains</label>
+          <label class="checkbox inline" title="Label each node of the rooted tree as a duplication (red square: its child clades share a species) or a speciation (blue dot)"><input type="checkbox" id="tv-events"> Duplications</label>
+          <span class="hint" id="tv-annot-status"></span>
+          <span class="spacer"></span>
+          <details class="export-menu">
+            <summary class="btn small ghost">Export ▾</summary>
+            <div class="export-list">
+              <button class="btn small ghost" id="svg-download" type="button">SVG (as shown)</button>
+              <button class="btn small ghost" id="newick-download" type="button">Newick (FastTree, unrooted)</button>
+              <button class="btn small ghost" id="newick-shown-download" type="button">Newick (rooted, as shown)</button>
+              <button class="btn small ghost" id="newick-copy" type="button">Copy Newick</button>
+              <button class="btn small ghost" id="annot-download" type="button">Annotations (TSV)</button>
+              <button class="btn small ghost" id="itol-color-download" type="button">iTOL colour strip</button>
+              <button class="btn small ghost" id="itol-domain-download" type="button">iTOL protein domains</button>
+              <button class="btn small ghost" id="events-download" type="button">Duplication / speciation nodes (TSV)</button>
+            </div>
+          </details>
+        </div>
+        <div class="tree-legend hidden" id="tree-legend"></div>
+        <div class="tree-scroll" id="tree-scroll">
+          <svg id="tree-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+          <div class="tree-popup hidden" id="tree-popup" role="dialog" aria-label="Details"></div>
+        </div>
+        <p class="hint">Click a leaf for details, or a branch to root on it or highlight its clade.</p>
         <details class="newick-details">
           <summary>Raw Newick</summary>
           <pre class="newick" id="newick-output"></pre>

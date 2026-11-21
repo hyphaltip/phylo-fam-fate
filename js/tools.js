@@ -158,36 +158,37 @@ export async function runBlast(program, queryFasta, sources, maxHits, onProgress
   if (!text.trim()) throw new Error(`${program} found no hits at E-value ≤ ${evalue} — try a looser search E-value or a different database`);
   const known = dbs.every(d => d.sequences != null);
   onProgress?.('Retrieving full-length subject sequences…');
-  const full = await fetchFullSubjects(text, dbs, sources);
-  return { text, full, sequences: known ? dbs.reduce((n, d) => n + d.sequences, 0) : null };
+  const { full, titles } = await fetchFullSubjects(text, dbs, sources);
+  return { text, full, titles, sequences: known ? dbs.reduce((n, d) => n + d.sequences, 0) : null };
 }
 
 /** Full-length sequences for every subject in a BLAST tabular result, keyed
  *  by accession (and sseqid). Uses blastdbcmd on the ID-indexed databases;
  *  inline sources that could not be indexed are looked up from their text. */
 async function fetchFullSubjects(tabular, dbs, sources) {
-  const full = new Map();
+  const full = new Map(), titles = new Map();
   const ids = new Set();
   for (const line of tabular.split('\n')) {
     const f = line.split('\t');
     if (f.length >= 14 && f[13]) ids.add(f[13]);
   }
-  if (!ids.size) return full;
+  if (!ids.size) return { full, titles };
   const parsedDbs = dbs.filter(d => d.parsed).map(d => d.name);
   if (parsedDbs.length) {
     await cli.mount([{ name: 'subject_ids.txt', data: [...ids].join('\n') + '\n' }]);
     // %a = accession, %s = sequence. IDs absent from one of the databases
     // are reported on stderr and skipped, which is expected with several.
     const out = execText(await cli.exec('blastdbcmd', [
-      '-db', parsedDbs.join(' '), '-entry_batch', 'subject_ids.txt', '-outfmt', '%a\t%s']));
+      '-db', parsedDbs.join(' '), '-entry_batch', 'subject_ids.txt', '-outfmt', '%a\t%s\t%t']));
     for (const line of out.split('\n')) {
-      const tab = line.indexOf('\t');
-      if (tab < 1) continue;
-      const acc = line.slice(0, tab).trim();
-      const seq = line.slice(tab + 1).trim();
-      if (!/^[A-Za-z*-]+$/.test(seq)) continue;
+      const [acc0, seq0, title] = line.split('\t');
+      const acc = (acc0 || '').trim(), seq = (seq0 || '').trim();
+      if (!acc || !/^[A-Za-z*-]+$/.test(seq)) continue;
       // Key by accession both with and without a version suffix (X.1 / X).
-      for (const k of [acc, acc.replace(/\.\d+$/, '')]) if (!full.has(k)) full.set(k, seq);
+      for (const k of [acc, acc.replace(/\.\d+$/, '')]) {
+        if (!full.has(k)) full.set(k, seq);
+        if (title && !titles.has(k)) titles.set(k, title.trim());
+      }
     }
   }
   // Inline (uploaded/pasted) sources that failed ID indexing: scan their text.
@@ -196,12 +197,17 @@ async function fetchFullSubjects(tabular, dbs, sources) {
     let name = null, seq = [];
     const flush = () => { if (name && !full.has(name)) full.set(name, seq.join('')); };
     for (const line of sources[i].data.split(/\r?\n/)) {
-      if (line.startsWith('>')) { flush(); name = line.slice(1).trim().split(/\s+/)[0]; seq = []; }
+      if (line.startsWith('>')) {
+        flush();
+        const t = line.slice(1).trim();
+        name = t.split(/\s+/)[0]; seq = [];
+        if (!titles.has(name)) titles.set(name, t);
+      }
       else if (name) seq.push(line.trim());
     }
     flush();
   }
-  return full;
+  return { full, titles };
 }
 
 /** Run local phmmer against a user-provided FASTA database.

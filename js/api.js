@@ -9,19 +9,20 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 /** Parse a FASTA string into [{name, seq}]. */
 export function parseFasta(text) {
   const records = [];
-  let name = '', seq = '';
+  let name = '', desc = '', seq = '';
   for (const line of text.split(/\r?\n/)) {
     const t = line.trim();
     if (!t) continue;
     if (t.startsWith('>')) {
-      if (name) records.push({ name, seq });
-      name = t.slice(1).trim().split(/\s+/)[0];
+      if (name) records.push({ name, seq, desc });
+      desc = t.slice(1).trim();            // full description line (OS=, GN=…)
+      name = desc.split(/\s+/)[0];
       seq = '';
     } else {
       seq += t;
     }
   }
-  if (name) records.push({ name, seq });
+  if (name) records.push({ name, seq, desc });
   return records;
 }
 
