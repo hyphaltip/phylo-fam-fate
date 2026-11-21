@@ -768,6 +768,8 @@ $('search-run').addEventListener('click', async () => {
   if (!dbReady()) { status('Choose a database source first', 'error'); return; }
 
   const maxHits = parseInt($('search-maxhits').value, 10) || 50;
+  const searchE = parseFloat($('search-evalue').value);
+  if (!(searchE > 0)) { status('Search E-value must be a positive number, e.g. 1e-3', 'error'); return; }
   stepStatus('search', 'running…', 'running');
   status(`Running ${tool} locally…`);
   $('search-run').disabled = true;
@@ -790,7 +792,7 @@ $('search-run').addEventListener('click', async () => {
       }
       const dbFasta = state.dbFasta;
       status('Running phmmer locally…');
-      const out = await runPhmmer(state.rawFasta, dbFasta);
+      const out = await runPhmmer(state.rawFasta, dbFasta, searchE);
       hits = parsePhmmerHits(out);
       // phmmer does not report sequences; recover them from the in-memory DB.
       state.dbIndex ||= new Map(parseFasta(dbFasta).map(r => [r.name, r.seq]));
@@ -801,7 +803,7 @@ $('search-run').addEventListener('click', async () => {
       const sources = state.dbSources.length
         ? state.dbSources
         : [{ data: state.dbFasta, label: state.dbSource }];
-      const { text: out, sequences, full } = await runBlast(tool, state.rawFasta, sources, maxHits, msg => status(msg));
+      const { text: out, sequences, full } = await runBlast(tool, state.rawFasta, sources, maxHits, msg => status(msg), searchE);
       debugLog(`BLAST searched ${sources.length} database(s)${sequences != null ? `, ${sequences.toLocaleString()} sequences` : ''}: ` +
         sources.map(x => x.label).join('; '));
       hits = parseBlastHits(out);
@@ -823,7 +825,7 @@ $('search-run').addEventListener('click', async () => {
     stepStatus('search', `${nProt} proteins`, 'done');
     const ms = performance.now() - t0;
     recordMeta('Search', tool, TOOL_VERSIONS[tool],
-      `maxHits=${maxHits}; evalue≤${$('hit-evalue').value}, score≥${$('hit-score').value}, pid≥${$('hit-pident').value}, len≥${$('hit-length').value}`,
+      `maxHits=${maxHits}; search evalue≤${searchE}; display evalue≤${$('hit-evalue').value}, score≥${$('hit-score').value}, pid≥${$('hit-pident').value}, len≥${$('hit-length').value}`,
       `${state.records.length} queries + ${state.dbSource}`, `${nProt} proteins (${hits.length} HSPs)`, ms);
     status(`Found ${nProt} proteins${hits.length > nProt ? ` (${hits.length} HSPs)` : ''} — filter and select which to align`, 'success');
   } catch (e) {

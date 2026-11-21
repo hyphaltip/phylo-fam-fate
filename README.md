@@ -76,6 +76,10 @@ runs. Nothing is ever uploaded to a server. The DB source, sequence count, and
 sizes are recorded in the metadata table.
 
 ### Hit cutoffs and selection
+The **Search E-value** (default `1e-3`) is passed to BLAST (`-evalue`) and
+phmmer (`-E`/`--domE`), so weak hits are never reported. The live cutoffs below
+can only tighten it; to see weaker hits, loosen it and search again.
+
 After a search, every hit is shown in a table with **E-value**, **score**,
 **% identity** (BLAST only — phmmer does not report identity), and **alignment
 length**. Live cutoffs (`E-value ≤`, `Score ≥`, `% identity ≥`, `Align length ≥`)

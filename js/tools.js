@@ -129,7 +129,7 @@ async function ensureBlastDb(source, dbType, onProgress) {
  *   is streamed into the WASM filesystem (never fully held in JS memory) and
  *   indexed separately; blastp/blastn then searches them together.
  */
-export async function runBlast(program, queryFasta, sources, maxHits, onProgress) {
+export async function runBlast(program, queryFasta, sources, maxHits, onProgress, evalue = 1e-3) {
   // Biowasm exposes each BLAST binary as a separate program (there is no
   // monolithic `blast.js`), so request the chosen program plus makeblastdb.
   await initTools([`blast/${program}/2.17.0`, 'blast/makeblastdb/2.17.0', 'blast/blastdbcmd/2.17.0']);
@@ -143,18 +143,19 @@ export async function runBlast(program, queryFasta, sources, maxHits, onProgress
   await cli.mount([{ name: 'query.fa', data: queryFasta }]);
   onProgress?.(`Running ${program} against ${dbs.length} database${dbs.length > 1 ? 's' : ''}…`);
   // Disable low-complexity masking so tandem-repeat queries aren't filtered
-  // out entirely. Use a permissive E-value — the UI applies live cutoffs.
+  // out entirely. The search E-value removes noise up front; the UI's live
+  // cutoffs can tighten it further.
   const filter = isNucleotide ? ['-task', 'blastn', '-dust', 'no'] : ['-seg', 'no'];
   // Array form: each flag is one argv element. A multi-database -db is a
   // single space-separated argument, which BLAST treats as one combined set
   // (E-values are computed against the total size of all of them).
   const result = await cli.exec(program, [
     '-query', 'query.fa', '-db', dbs.map(d => d.name).join(' '), ...filter,
-    '-evalue', '1000', '-max_target_seqs', String(maxHits),
+    '-evalue', String(evalue), '-max_target_seqs', String(maxHits),
     '-outfmt', '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore sseq sacc slen',
   ]);
   const text = execText(result);
-  if (!text.trim()) throw new Error(`${program} produced no hits — try a different query/database`);
+  if (!text.trim()) throw new Error(`${program} found no hits at E-value ≤ ${evalue} — try a looser search E-value or a different database`);
   const known = dbs.every(d => d.sequences != null);
   onProgress?.('Retrieving full-length subject sequences…');
   const full = await fetchFullSubjects(text, dbs, sources);
@@ -205,7 +206,7 @@ async function fetchFullSubjects(tabular, dbs, sources) {
 
 /** Run local phmmer against a user-provided FASTA database.
  *  The WASM build is `phmmer-simd`; it supports -E/-T but not --maxhits/-M. */
-export async function runPhmmer(queryFasta, dbFasta) {
+export async function runPhmmer(queryFasta, dbFasta, evalue = 1e-3) {
   await initTools(['hmmer/phmmer/3.4']);
   await cli.mount([
     { name: 'query.fa', data: queryFasta },
@@ -213,9 +214,9 @@ export async function runPhmmer(queryFasta, dbFasta) {
   ]);
   // --noali keeps output compact; the score table and domain coordinates we
   // parse are still present. Truncation happens client-side.
-  const result = await cli.exec(`phmmer -E 1000 --domE 1000 --noali query.fa db.fa`);
+  const result = await cli.exec(`phmmer -E ${evalue} --domE ${evalue} --noali query.fa db.fa`);
   const text = execText(result);
-  if (!text.trim()) throw new Error('phmmer produced no hits — try a different query/database');
+  if (!text.trim()) throw new Error(`phmmer found no hits at E-value ≤ ${evalue} — try a looser search E-value or a different database`);
   return text;
 }
 
