@@ -15,18 +15,19 @@ check(){ local d=$1; shift; if "$@"; then ok "$d"; else bad "$d"; fi; }
 tips() { grep -o '[,(][^(),:;]*:' "$1" | wc -l; }
 section(){ printf '\n== %s\n' "$*"; }
 
+# Version banners: pipes like "| head -n1" can SIGPIPE under pipefail, so never fatal
 section "tool versions"
-blastp -version | head -n1
-phmmer -h | grep -m1 HMMER
+blastp -version | head -n1 || true
+phmmer -h | grep -m1 HMMER || true
 kalign --version 2>&1 | head -n1 || true
-muscle -version 2>&1 | head -n1
-mafft --version 2>&1 | head -n1
-iqtree3 --version 2>&1 | head -n1
-raxml-ng --version 2>&1 | grep -m1 RAxML
-FastTree -expert 2>&1 | head -n1
-FastTree-browser -expert 2>&1 | head -n1
-node --version
-famfate.sh --version
+muscle -version 2>&1 | head -n1 || true
+mafft --version 2>&1 | head -n1 || true
+iqtree3 --version 2>&1 | head -n1 || true
+raxml-ng --version 2>&1 | grep -m1 RAxML || true
+FastTree -expert 2>&1 | head -n1 || true
+FastTree-browser -expert 2>&1 | head -n1 || true
+node --version || true
+famfate.sh --version || true
 
 section "1. family → kalign → trim → FastTree (offline)"
 famfate.sh --family "$EX/proteins.fa" --no-annotate -o t1 -T 2 >/dev/null 2>t1.err || { cat t1.err; bad "pipeline ran"; }
