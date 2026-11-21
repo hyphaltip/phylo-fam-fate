@@ -31,23 +31,28 @@ export async function initTools(tools) {
   return cli;
 }
 
+/** Exact Biowasm tool versions, recorded in run metadata for provenance. */
+export const TOOL_VERSIONS = {
+  muscle: '5.1.0', kalign: '3.3.1', blastp: '2.17.0', blastn: '2.17.0', phmmer: '3.4',
+};
+
 /** Mount a FASTA string as a virtual file, run an aligner, return aligned FASTA. */
 export async function runAligner(tool, fasta) {
-  const specs = {
-    muscle: 'muscle/5.1.0',
-    kalign: 'kalign/3.3.1',
-  };
-  await initTools([specs[tool]]);
-  const inputName = 'input.fa';
+  await initTools([`${tool}/${TOOL_VERSIONS[tool]}`]);
+  // Unique file names per run: a stale aligned.fa from an earlier run would
+  // otherwise be returned silently if this run fails to write its output.
+  const tag = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const inputName = `input_${tag}.fa`;
+  const outputName = `aligned_${tag}.fa`;
   await cli.mount([{ name: inputName, data: fasta }]);
 
   let cmd;
   switch (tool) {
     case 'muscle':
-      cmd = `muscle -align ${inputName} -output aligned.fa`;
+      cmd = `muscle -align ${inputName} -output ${outputName}`;
       break;
     case 'kalign':
-      cmd = `kalign -i ${inputName} -o aligned.fa`;
+      cmd = `kalign -i ${inputName} -o ${outputName}`;
       break;
     default:
       throw new Error(`Unknown aligner: ${tool}`);
@@ -55,9 +60,13 @@ export async function runAligner(tool, fasta) {
 
   const result = await cli.exec(cmd);
   // Biowasm tools run with cwd=/shared/data; output files are relative to it.
-  const out = await cli.cat('aligned.fa');
+  let out = '';
+  try { out = await cli.cat(outputName); } catch { /* no output file */ }
   if (typeof out !== 'string' || !out.trim()) {
-    throw new Error(`aligner produced no output (stdout: ${execText(result).slice(-200)})`);
+    // Keep the whole log: the line that says *why* (e.g. "Only 1 sequence
+    // was found") comes before the stack of "Function ... failed" lines.
+    const log = execText(result).trim();
+    throw new Error(`${tool} produced no alignment.\n${log.slice(-2000)}`);
   }
   return out;
 }
@@ -130,7 +139,12 @@ export function parseBlastHits(tabular) {
       length: parseInt(f[3], 10),
       evalue: parseFloat(f[10]),
       score: parseFloat(f[11]),
-      seq: f[12] || '',   // sseq — full subject sequence from the DB
+      // sseq is the *aligned region* of the subject (HSP only, with '-' for
+      // gaps), not the full database sequence. Strip gaps so the aligner
+      // gets raw residues.
+      seq: (f[12] || '').replace(/[-.]/g, ''),
+      sstart: parseInt(f[8], 10),
+      send: parseInt(f[9], 10),
     });
   }
   return hits;

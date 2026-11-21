@@ -1,10 +1,10 @@
 /* Main application: orchestrates the search -> align -> trim -> tree pipeline. */
 
 import { retrieve, parseFasta, toFasta } from './api.js';
-import { runAligner, runBlast, runPhmmer, parseBlastHits, parsePhmmerHits } from './tools.js';
+import { runAligner, runBlast, runPhmmer, parseBlastHits, parsePhmmerHits, TOOL_VERSIONS } from './tools.js';
 import { trimAlignment } from './trim.js';
-import { parseNewick, drawTree, treeStats } from './tree.js';
-import initFastTree, { buildTree, fastTreeVersion } from '../assets/fasttree/phylo_fasttree_wasm.js';
+import { parseNewick, drawTree, treeStats, midpointRoot, ladderize } from './tree.js';
+import { renderMsa } from './msa.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -12,6 +12,7 @@ const $ = (id) => document.getElementById(id);
 const state = {
   rawFasta: '',       // original input sequences
   dbFasta: '',        // search database held in memory (custom / phmmer)
+  dbIndex: null,      // Map name -> seq for dbFasta (built once, reused by phmmer)
   dbUrl: '',          // streamed DB URL (BLAST presets)
   dbSource: '',       // human-readable DB source
   dbPreset: 'uniprot-sprot',
@@ -22,6 +23,8 @@ const state = {
   alignedFasta: '',   // aligned sequences
   trimmedFasta: '',   // trimmed alignment
   newick: '',
+  tree: null,         // parsed Newick (unrooted, as FastTree wrote it)
+  ftVersion: '',
   records: [],
   metadata: [],
   timings: [],        // {step, ms} for the runtime strip
@@ -41,6 +44,11 @@ function stepStatus(id, text, kind = '') {
   const el = $(`status-${id}`);
   el.textContent = text;
   el.className = `step-status ${kind}`;
+  const nav = $(`nav-${id}`);
+  if (nav) {
+    nav.textContent = text;
+    nav.parentElement.className = kind;
+  }
 }
 function recordMeta(step, tool, version, params, inputDesc, outputDesc, ms) {
   state.metadata.push({
@@ -62,14 +70,21 @@ function renderMetadata() {
   const tbody = document.querySelector('#metadata-table tbody');
   tbody.innerHTML = state.metadata.map(m => `
     <tr>
-      <td>${m.step}</td><td>${m.tool}</td><td>${m.version}</td>
+      <td>${escapeHtml(m.step)}</td><td>${escapeHtml(m.tool)}</td><td>${escapeHtml(m.version)}</td>
       <td title="${escapeAttr(m.params)}">${escapeHtml(trunc(m.params, 60))}</td>
       <td>${escapeHtml(m.input)}</td><td>${escapeHtml(m.output)}</td>
       <td>${m.time}</td>
     </tr>`).join('');
 }
-function escapeHtml(s) { return String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
-function escapeAttr(s) { return escapeHtml(s).replace(/"/g, '&quot;'); }
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+const escapeAttr = escapeHtml;
+function download(name, text, type = 'text/plain') {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type }));
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 0);
+}
 function trunc(s, n) { return String(s).length > n ? String(s).slice(0, n) + '…' : String(s); }
 
 // ---------------------------------------------------------------------------
@@ -87,9 +102,15 @@ function debugLog(msg, kind = '') {
   el.textContent = lines.join('\n');
   el.scrollTop = el.scrollHeight;
 }
+let debugErrors = 0;
 function revealDebug() {
   $('debug-panel')?.classList.remove('collapsed');
   $('debug-toggle').textContent = 'Hide';
+}
+function bumpDebugBadge() {
+  debugErrors++;
+  $('debug-badge').textContent = debugErrors;
+  $('debug-badge').classList.remove('hidden');
 }
 function showStepError(step, err) {
   const body = $(`step-${step}`)?.querySelector('.step-body');
@@ -105,7 +126,7 @@ function showStepError(step, err) {
     box.classList.remove('hidden');
   }
   debugLog(`${step} ERROR: ${err?.stack || err}`, 'ERROR');
-  revealDebug();
+  bumpDebugBadge();
 }
 function clearStepError(step) { $(`error-${step}`)?.classList.add('hidden'); }
 
@@ -119,6 +140,7 @@ for (const level of ['warn', 'error']) {
   const orig = console[level].bind(console);
   console[level] = (...args) => {
     debugLog(args.map(a => a?.stack || String(a)).join(' '), level.toUpperCase());
+    if (level === 'error') bumpDebugBadge();
     orig(...args);
   };
 }
@@ -126,7 +148,11 @@ $('debug-toggle').addEventListener('click', () => {
   const collapsed = $('debug-panel').classList.toggle('collapsed');
   $('debug-toggle').textContent = collapsed ? 'Show' : 'Hide';
 });
-$('debug-clear').addEventListener('click', () => { $('debug-log').textContent = ''; });
+$('debug-clear').addEventListener('click', () => {
+  $('debug-log').textContent = '';
+  debugErrors = 0;
+  $('debug-badge').classList.add('hidden');
+});
 $('debug-copy').addEventListener('click', async () => {
   try {
     await navigator.clipboard.writeText($('debug-log').textContent);
@@ -150,18 +176,50 @@ function seqType(fasta) {
 }
 
 // ---------------------------------------------------------------------------
-// Initialization
+// FastTree worker: inference runs off the main thread so the page stays
+// responsive and a run can be cancelled (terminate + respawn the worker).
 // ---------------------------------------------------------------------------
-try {
-  await initFastTree();
+let ftWorker = null, ftSeq = 0;
+const ftPending = new Map();
+function spawnFastTree() {
+  ftWorker = new Worker(new URL('./fasttree-worker.js', import.meta.url), { type: 'module' });
+  ftWorker.onmessage = ({ data }) => {
+    const p = ftPending.get(data.id);
+    if (!p) return;
+    ftPending.delete(data.id);
+    data.ok ? p.resolve(data) : p.reject(new Error(data.error));
+  };
+  ftWorker.onerror = e => {
+    const err = new Error(`FastTree worker error: ${e.message || 'failed to load'}`);
+    for (const p of ftPending.values()) p.reject(err);
+    ftPending.clear();
+  };
+}
+function ftCall(msg) {
+  const id = ++ftSeq;
+  return new Promise((resolve, reject) => {
+    ftPending.set(id, { resolve, reject });
+    ftWorker.postMessage({ ...msg, id });
+  });
+}
+function cancelFastTree() {
+  ftWorker?.terminate();
+  for (const p of ftPending.values()) p.reject(new Error('cancelled'));
+  ftPending.clear();
+  spawnFastTree();
+}
+
+spawnFastTree();
+ftCall({ type: 'version' }).then(({ version }) => {
+  state.ftVersion = version;
   $('tree-run').disabled = false;
-  status(`FastTree ${fastTreeVersion()} and Biowasm tools ready`, 'success');
+  status(`FastTree ${version} ready — load sequences to begin`, 'success');
   stepStatus('tree', 'ready');
-} catch (e) {
-  status(`Failed to load FastTree WASM: ${e}`, 'error');
+}).catch(e => {
+  status(`Failed to load FastTree WASM: ${e.message}`, 'error');
   showStepError('tree', e);
   debugLog('FastTree WASM init failed — the Build tree button stays disabled', 'FATAL');
-}
+});
 
 // ---------------------------------------------------------------------------
 // STEP 1: Input
@@ -198,16 +256,45 @@ function loadInputFile(file) {
   reader.readAsText(file);
 }
 
-$('paste-fasta').addEventListener('input', () => setRawFasta($('paste-fasta').value, 'pasted text'));
+let pasteTimer = 0;
+$('paste-fasta').addEventListener('input', () => {
+  clearTimeout(pasteTimer);
+  pasteTimer = setTimeout(() => setRawFasta($('paste-fasta').value, 'pasted text'), 300);
+});
+
+async function loadExample(file, label) {
+  try {
+    const r = await fetch(`assets/examples/${file}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    setRawFasta(await r.text(), label);
+  } catch (e) {
+    status(`Could not load example: ${e.message}`, 'error');
+  }
+}
+$('load-example-aa').addEventListener('click', () => loadExample('proteins.fa', 'example proteins (unaligned)'));
+$('load-example-nt').addEventListener('click', () => loadExample('nucleotide_aligned.fa', 'example nucleotide alignment'));
+
+function showMsa(id, fasta, type) {
+  renderMsa($(id), fasta, { type });
+  $(id).classList.remove('hidden');
+}
 
 function setRawFasta(fasta, source) {
   state.rawFasta = fasta.trim();
   state.records = parseFasta(state.rawFasta);
   state.alignedFasta = '';
   state.trimmedFasta = '';
+  state.searchFasta = '';
+  state.searchHits = [];
+  state.selectedHits = new Set();
   state.newick = '';
+  state.tree = null;
   $('newick-output').textContent = '';
-  $('tree-results').classList.add('hidden');
+  for (const id of ['tree-results', 'align-preview', 'align-actions', 'trim-preview', 'trim-actions',
+    'trim-stats', 'hit-controls', 'hit-results', 'search-preview']) $(id).classList.add('hidden');
+  $('align-input').querySelector('option[value="search"]').textContent = 'Search hits';
+  $('trim-run').disabled = true;
+  ['input', 'align', 'trim', 'tree', 'search'].forEach(clearStepError);
 
   if (!state.records.length) {
     $('sequence-summary').textContent = '';
@@ -224,10 +311,20 @@ function setRawFasta(fasta, source) {
     ${state.rawFasta.length.toLocaleString()} characters`;
   $('file-info').textContent = source;
   stepStatus('input', `${state.records.length} seq`, 'done');
-  status(`Loaded ${state.records.length} sequences — you can align or build a tree`, 'success');
-  stepStatus('align', 'waiting');
+  const aligned = new Set(lengths).size === 1 && state.records.length > 1;
+  status(`Loaded ${state.records.length} sequences — ` +
+    (aligned ? 'already aligned: you can trim or build a tree directly' : 'next, align them (step 3)'), 'success');
+  stepStatus('align', aligned ? 'optional' : 'ready');
   stepStatus('trim', 'waiting');
-  stepStatus('tree', 'waiting');
+  stepStatus('tree', aligned ? 'ready' : 'needs alignment');
+  if (aligned) {
+    // An aligned input can go straight to trimming
+    state.alignedFasta = state.rawFasta;
+    $('trim-run').disabled = false;
+    showMsa('align-preview', state.alignedFasta, type);
+  }
+  stepStatus('search', 'optional');
+  syncModelControls();
   $('search-enable').checked = false;
   $('search-options').classList.add('hidden');
   $('align-input').value = 'original';
@@ -306,15 +403,17 @@ async function fetchDb(url, label) {
 function setDbUrl(url, label, note = '') {
   state.dbUrl = url;
   state.dbFasta = '';
+  state.dbIndex = null;
   state.dbSource = label;
   $('search-db-info').innerHTML =
     `<strong>${escapeHtml(label)}</strong>${note ? ' · ' + note : ''} · streamed into Biowasm at search time (nothing uploaded)`;
-  stepStatus('search', 'db ready', 'done');
+  stepStatus('search', 'db ready');
 }
 
 /** Describe an in-memory DB in the UI. */
 function setSearchDb({ text, records, gzipped, bytes }, source) {
   state.dbFasta = text;
+  state.dbIndex = new Map(records.map(r => [r.name, r.seq]));
   state.dbUrl = '';
   state.dbSource = source;
   const size = gzipped ? `${bytes.toLocaleString()} B gzipped → ${text.length.toLocaleString()} B` : `${text.length.toLocaleString()} B`;
@@ -467,13 +566,6 @@ function renderHits() {
     </tr>`;
   }).join('');
   $('hit-table-body').innerHTML = html || '<tr><td colspan="7" class="hint">No hits pass the current cutoffs</td></tr>';
-  document.querySelectorAll('.hit-check').forEach(cb => {
-    cb.addEventListener('change', () => {
-      if (cb.checked) state.selectedHits.add(cb.dataset.key);
-      else state.selectedHits.delete(cb.dataset.key);
-      updateHitSummary();
-    });
-  });
   $('hit-controls').classList.remove('hidden');
   $('hit-results').classList.remove('hidden');
   updateHitSummary();
@@ -485,6 +577,14 @@ function updateHitSummary() {
   $('hit-use-selected').textContent = `Use ${chosen} selected for alignment →`;
   $('hit-use-selected').disabled = chosen === 0;
 }
+
+$('hit-table-body').addEventListener('change', e => {
+  const cb = e.target.closest('.hit-check');
+  if (!cb) return;
+  if (cb.checked) state.selectedHits.add(cb.dataset.key);
+  else state.selectedHits.delete(cb.dataset.key);
+  updateHitSummary();
+});
 
 ['hit-evalue', 'hit-score', 'hit-pident', 'hit-length'].forEach(id => {
   $(id).addEventListener('input', renderHits);
@@ -498,15 +598,28 @@ $('hit-select-none').addEventListener('click', () => {
 });
 
 $('hit-use-selected').addEventListener('click', () => {
-  const chosen = state.searchHits.filter(h => state.selectedHits.has(hitKey(h)) && passesCutoffs(h) && h.seq);
+  const picked = state.searchHits.filter(h => state.selectedHits.has(hitKey(h)) && passesCutoffs(h) && h.seq);
+  // One subject can hit several queries/HSPs; FastTree rejects duplicate
+  // names, so keep the best (first, E-value-sorted) record per subject.
+  const seen = new Set();
+  const out = [];
+  if ($('hit-include-query').checked) {
+    for (const r of state.records) { if (!seen.has(r.name)) { seen.add(r.name); out.push(r); } }
+  }
+  for (const h of picked) {
+    if (seen.has(h.name)) continue;
+    seen.add(h.name);
+    out.push({ name: h.name, seq: h.seq });
+  }
+  const chosen = out;
   if (!chosen.length) { status('No usable sequences in the selection', 'error'); return; }
-  state.searchFasta = toFasta(chosen.map(h => ({ name: h.name, seq: h.seq })));
+  state.searchFasta = toFasta(chosen);
   $('align-input').value = 'search';
   $('align-input').querySelector('option[value="search"]').textContent = `Search hits (${chosen.length})`;
   stepStatus('search', `${chosen.length} selected`, 'done');
   status(`${chosen.length} sequences ready for alignment`, 'success');
   recordMeta('Select hits', 'browser', VERSION, 'cutoffs + manual selection',
-    `${state.searchHits.length} hits`, `${chosen.length} sequences`, null);
+    `${state.searchHits.length} hits`, `${chosen.length} sequences (${picked.length} hits, deduplicated${$('hit-include-query').checked ? ', + queries' : ''})`, null);
 });
 
 // --- Run the search ------------------------------------------------------------
@@ -529,12 +642,13 @@ $('search-run').addEventListener('click', async () => {
         const decoded = await fetchDb(state.dbUrl, state.dbSource);
         dbFasta = decoded.text;
         state.dbFasta = dbFasta; // cache for subsequent phmmer runs
+        state.dbIndex = new Map(decoded.records.map(r => [r.name, r.seq]));
       }
       const out = await runPhmmer(state.rawFasta, dbFasta);
       hits = parsePhmmerHits(out);
       // phmmer does not report sequences; recover them from the in-memory DB.
-      const byName = new Map(parseFasta(dbFasta).map(r => [r.name, r.seq]));
-      hits.forEach(h => { h.seq = byName.get(h.name) || ''; });
+      state.dbIndex ||= new Map(parseFasta(dbFasta).map(r => [r.name, r.seq]));
+      hits.forEach(h => { h.seq = state.dbIndex.get(h.name) || ''; });
       $('search-preview').textContent = out.slice(0, 3000);
     } else {
       // BLAST embeds full subject sequences (sseq) in its tabular output.
@@ -551,14 +665,14 @@ $('search-run').addEventListener('click', async () => {
     renderHits();
     stepStatus('search', `${hits.length} hits`, 'done');
     const ms = performance.now() - t0;
-    recordMeta('Search', tool, 'biowasm',
+    recordMeta('Search', tool, TOOL_VERSIONS[tool],
       `maxHits=${maxHits}; evalue≤${$('hit-evalue').value}, score≥${$('hit-score').value}, pid≥${$('hit-pident').value}, len≥${$('hit-length').value}`,
       `${state.records.length} queries + ${state.dbSource}`, `${hits.length} hits`, ms);
     status(`Found ${hits.length} hits — filter and select which to align`, 'success');
   } catch (e) {
     showStepError('search', `Search failed: ${e.stack || e.message || e}`);
     status(`Search failed: ${e.message}`, 'error');
-    stepStatus('search', 'error');
+    stepStatus('search', 'error', 'error');
   } finally {
     $('search-run').disabled = false;
   }
@@ -570,36 +684,64 @@ applyDbPreset();
 // ---------------------------------------------------------------------------
 // STEP 3: Align
 // ---------------------------------------------------------------------------
+$('align-download').addEventListener('click', () => download('phylo-fam-fate-aligned.fa', state.alignedFasta + '\n'));
+$('trim-download').addEventListener('click', () => download('phylo-fam-fate-trimmed.fa', state.trimmedFasta));
 $('align-run').addEventListener('click', async () => {
   const source = $('align-input').value;
   const fasta = source === 'search' ? state.searchFasta : state.rawFasta;
   if (!fasta) { status(`No ${source === 'search' ? 'search hits' : 'input sequences'} to align`, 'error'); return; }
+
+  // Aligners need at least two sequences. The common trap: one query was
+  // searched, hits were selected, but "Use selected" was never clicked, so
+  // the aligner would get just the single query.
+  const nSeq = parseFasta(fasta).length;
+  if (nSeq < 2) {
+    const pendingHits = source === 'original' && state.selectedHits.size > 0;
+    const msg = pendingHits
+      ? `Only 1 input sequence. You selected ${state.selectedHits.size} search hits — click ` +
+        '"Use selected for alignment →" in step 2 (or switch Input to "Search hits") first.'
+      : `Need at least 2 sequences to align; ${source === 'search' ? 'the selected hits give' : 'the input has'} ${nSeq}. ` +
+        'Load more sequences, or run a search (step 2) and use the selected hits.';
+    showStepError('align', msg);
+    status('Alignment needs at least 2 sequences', 'error');
+    stepStatus('align', 'need ≥2 seqs', 'error');
+    return;
+  }
 
   const tool = $('align-tool').value;
   const type = seqType(fasta);
   stepStatus('align', 'running…', 'running');
   status(`Aligning with ${tool}…`);
   $('align-run').disabled = true;
+  clearStepError('align');
   const t0 = performance.now();
   try {
     const aligned = await runAligner(tool, fasta);
     if (!aligned || !parseFasta(aligned).length) throw new Error('aligner produced no output');
     state.alignedFasta = aligned.trim();
+    // A new alignment invalidates any earlier trim (the tree step prefers the
+    // trimmed alignment, so a stale one would silently be used instead).
+    state.trimmedFasta = '';
+    $('trim-stats').classList.add('hidden');
+    $('trim-preview').classList.add('hidden');
+    $('trim-actions').classList.add('hidden');
     const recs = parseFasta(state.alignedFasta);
     const alen = recs[0].seq.length;
-    $('align-preview').textContent = state.alignedFasta.slice(0, 2500) +
-      (state.alignedFasta.length > 2500 ? '\n…' : '');
-    $('align-preview').classList.remove('hidden');
+    showMsa('align-preview', state.alignedFasta, type);
+    $('align-actions').classList.remove('hidden');
+    $('trim-run').disabled = false;
     stepStatus('align', `${recs.length} × ${alen}`, 'done');
-    recordMeta('Align', tool, 'biowasm', `--auto (${type})`,
+    recordMeta('Align', tool, TOOL_VERSIONS[tool],
+      tool === 'muscle' ? `-align (defaults; ${type})` : `-i -o (defaults; ${type})`,
       `${recs.length} seq`, `${recs.length} × ${alen} alignment`, performance.now() - t0);
     status(`Aligned ${recs.length} sequences (${alen} columns)`, 'success');
     stepStatus('trim', 'ready');
     stepStatus('tree', 'ready');
+    $('step-trim').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   } catch (e) {
     showStepError('align', `Alignment failed: ${e.stack || e.message || e}`);
     status(`Alignment failed: ${e.message}`, 'error');
-    stepStatus('align', 'error');
+    stepStatus('align', 'error', 'error');
   } finally {
     $('align-run').disabled = false;
   }
@@ -634,8 +776,9 @@ $('trim-run').addEventListener('click', () => {
       <div class="stat"><span class="stat-label">Removed</span><span class="stat-value">${stats.removed}</span></div>
       <div class="stat"><span class="stat-label">Sequences</span><span class="stat-value">${stats.sequences}</span></div>`;
     $('trim-stats').classList.remove('hidden');
-    $('trim-preview').textContent = fasta.slice(0, 2500) + (fasta.length > 2500 ? '\n…' : '');
-    $('trim-preview').classList.remove('hidden');
+    showMsa('trim-preview', fasta, seqType(fasta));
+    $('trim-actions').classList.remove('hidden');
+    clearStepError('trim');
     stepStatus('trim', `${stats.after} cols`, 'done');
     recordMeta('Trim', 'trimAl-like (JS)', VERSION,
       `gap≤${opts.gapThreshold}, cons≥${opts.minConservation}, ends=${opts.trimEnds}`,
@@ -644,14 +787,47 @@ $('trim-run').addEventListener('click', () => {
   } catch (e) {
     showStepError('trim', `Trim failed: ${e.stack || e.message || e}`);
     status(`Trim failed: ${e.message}`, 'error');
-    stepStatus('trim', 'error');
+    stepStatus('trim', 'error', 'error');
   }
 });
 
 // ---------------------------------------------------------------------------
 // STEP 5: Tree
 // ---------------------------------------------------------------------------
-$('tree-run').addEventListener('click', () => {
+function renderTree() {
+  if (!state.tree) return;
+  // Re-root/ladderize a fresh copy so toggles are reversible
+  let t = structuredClone(state.tree);
+  if ($('tv-midpoint').checked) t = midpointRoot(t);
+  if ($('tv-ladderize').checked) ladderize(t);
+  const { matches } = drawTree($('tree-svg'), t, {
+    showSupport: $('tv-support').checked && !$('tree-nosupport').checked,
+    cladogram: $('tv-cladogram').checked,
+    highlight: $('tv-find').value,
+  });
+  const q = $('tv-find').value.trim();
+  $('tv-find-count').textContent = q ? `${matches} match${matches === 1 ? '' : 'es'}` : '';
+}
+['tv-midpoint', 'tv-ladderize', 'tv-cladogram', 'tv-support'].forEach(id => $(id).addEventListener('change', renderTree));
+$('tv-find').addEventListener('input', renderTree);
+let resizeTimer = 0;
+window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderTree, 150); });
+
+function syncModelControls() {
+  const model = $('tree-model').value;
+  const fasta = state.trimmedFasta || state.alignedFasta || state.rawFasta;
+  const type = model === 'auto' ? (fasta ? seqType(fasta) : 'nt') : (model === 'nt' ? 'nt' : 'aa');
+  $('tree-gtr').disabled = type !== 'nt';
+  $('tree-gtr-wrap').style.opacity = type === 'nt' ? '' : '0.45';
+}
+$('tree-model').addEventListener('change', syncModelControls);
+
+$('tree-cancel').addEventListener('click', () => {
+  cancelFastTree();
+  debugLog('Tree inference cancelled by user');
+});
+
+$('tree-run').addEventListener('click', async () => {
   const source = state.trimmedFasta ? 'trimmed' : (state.alignedFasta ? 'aligned' : 'raw');
   const fasta = state.trimmedFasta || state.alignedFasta || state.rawFasta;
   if (!fasta) { status('Load or align sequences first', 'error'); return; }
@@ -667,7 +843,7 @@ $('tree-run').addEventListener('click', () => {
   if ($('tree-nosupport').checked) args.push('-nosupport');
 
   // FastTree requires an alignment. Give a clear, visible message instead of
-  // letting the crate's length validator fail silently at the top of the page.
+  // letting the crate's length validator fail at the top of the page.
   const recs = parseFasta(fasta);
   const lengths = [...new Set(recs.map(r => r.seq.length))];
   if (lengths.length > 1) {
@@ -675,43 +851,57 @@ $('tree-run').addEventListener('click', () => {
       'FastTree needs an alignment — run step 3 (Align) first, or load an already-aligned FASTA.';
     showStepError('tree', hint);
     status('Tree needs an alignment — align first', 'error');
-    stepStatus('tree', 'needs alignment');
+    stepStatus('tree', 'needs alignment', 'error');
+    return;
+  }
+  const dupes = recs.map(r => r.name).filter((n, i, a) => a.indexOf(n) !== i);
+  if (dupes.length) {
+    showStepError('tree', `Duplicate sequence names: ${[...new Set(dupes)].slice(0, 5).join(', ')}. FastTree requires unique names.`);
+    stepStatus('tree', 'duplicate names', 'error');
     return;
   }
 
   clearStepError('tree');
   debugLog(`buildTree: source=${source}, seqs=${recs.length}, length=${lengths[0]}, ` +
-    `args=[${args.join(' ') || 'defaults'}], model=${model}, type=${type}, version=${fastTreeVersion()}`);
-  debugLog(`Tree input preview: ${recs[0]?.name} = ${recs[0]?.seq.slice(0, 60)}${recs[0]?.seq.length > 60 ? '…' : ''}`);
+    `args=[${args.join(' ') || 'defaults'}], model=${model}, type=${type}, version=${state.ftVersion}`);
   stepStatus('tree', 'running…', 'running');
-  status(`Building tree with FastTree (${type === 'nt' ? 'nucleotide' : 'protein'})…`);
+  status(`Building tree with FastTree (${type === 'nt' ? 'nucleotide' : 'protein'}, ${recs.length} × ${lengths[0]})…`);
   $('tree-run').disabled = true;
+  $('tree-cancel').classList.remove('hidden');
+  $('tree-elapsed').classList.remove('hidden');
+  const t0 = performance.now();
+  const tick = setInterval(() => {
+    $('tree-elapsed').textContent = `${((performance.now() - t0) / 1000).toFixed(1)}s`;
+  }, 100);
 
-  // Let the status paint before the synchronous WASM call
-  setTimeout(() => {
-    const t0 = performance.now();
-    try {
-      state.newick = buildTree(fasta, args);
-      const tree = parseNewick(state.newick);
-      const stats = treeStats(tree);
-      $('newick-output').textContent = state.newick;
-      $('tree-results').classList.remove('hidden');
-      drawTree($('tree-svg'), tree, { showSupport: !$('tree-nosupport').checked });
-      stepStatus('tree', `${stats.tips} tips`, 'done');
-      recordMeta('Tree', 'FastTree', fastTreeVersion(), args.join(' ') || '(defaults)',
-        `${stats.tips} seq alignment`, `tree, ${stats.tips} tips`, performance.now() - t0);
-      debugLog(`Tree OK: ${stats.tips} tips, ${state.newick.length} Newick chars`);
-      status(`Tree inferred: ${stats.tips} tips in ${((performance.now() - t0) / 1000).toFixed(2)}s`, 'success');
-      $('tree-svg').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    } catch (e) {
-      const detail = e?.stack || String(e);
-      showStepError('tree', `Tree inference failed: ${detail}`);
-      status(`Tree inference failed: ${e}`, 'error');
-      stepStatus('tree', 'error');
-    } finally {
-      $('tree-run').disabled = false;
+  try {
+    const { newick, ms } = await ftCall({ fasta, args });
+    state.newick = newick;
+    state.tree = parseNewick(newick);
+    const stats = treeStats(state.tree);
+    $('newick-output').textContent = newick;
+    $('tree-results').classList.remove('hidden');
+    renderTree();
+    stepStatus('tree', `${stats.tips} tips`, 'done');
+    recordMeta('Tree', 'FastTree', state.ftVersion, args.join(' ') || '(defaults)',
+      `${recs.length} × ${lengths[0]} ${source} alignment`, `tree, ${stats.tips} tips`, ms);
+    debugLog(`Tree OK: ${stats.tips} tips, ${newick.length} Newick chars`);
+    status(`Tree inferred: ${stats.tips} tips in ${(ms / 1000).toFixed(2)}s`, 'success');
+    $('tree-results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (e) {
+    if (e.message === 'cancelled') {
+      status('Tree inference cancelled', '');
+      stepStatus('tree', 'cancelled');
+    } else {
+      showStepError('tree', `Tree inference failed: ${e.message}`);
+      status(`Tree inference failed: ${e.message}`, 'error');
+      stepStatus('tree', 'error', 'error');
     }
-  }, 50);
+  } finally {
+    clearInterval(tick);
+    $('tree-run').disabled = false;
+    $('tree-cancel').classList.add('hidden');
+  }
 });
 
 $('newick-copy').addEventListener('click', async () => {
@@ -722,13 +912,11 @@ $('newick-copy').addEventListener('click', async () => {
     status('Clipboard access denied', 'error');
   }
 });
-$('newick-download').addEventListener('click', () => {
-  const blob = new Blob([state.newick + '\n'], { type: 'text/plain' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'phylo-fam-fate-tree.nwk';
-  a.click();
-  URL.revokeObjectURL(a.href);
+$('newick-download').addEventListener('click', () => download('phylo-fam-fate-tree.nwk', state.newick + '\n'));
+$('svg-download').addEventListener('click', () => {
+  const svg = $('tree-svg').cloneNode(true);
+  svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  download('phylo-fam-fate-tree.svg', new XMLSerializer().serializeToString(svg), 'image/svg+xml');
 });
 
 // ---------------------------------------------------------------------------
@@ -742,12 +930,7 @@ $('metadata-export').addEventListener('click', () => {
     srcType: seqType(state.rawFasta || 'ACGT'),
     steps: state.metadata,
   };
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'phylo-fam-fate-metadata.json';
-  a.click();
-  URL.revokeObjectURL(a.href);
+  download('phylo-fam-fate-metadata.json', JSON.stringify(data, null, 2), 'application/json');
 });
 
 // ---------------------------------------------------------------------------
@@ -766,10 +949,14 @@ if (new URLSearchParams(location.search).has('autotest')) {
       if (state.alignedFasta) {
         clearInterval(wait);
         $('trim-run').click();
-        setTimeout(() => $('tree-run').click(), 50);
+        const ready = setInterval(() => {
+          if (!$('tree-run').disabled) { clearInterval(ready); $('tree-run').click(); }
+        }, 100);
       }
     }, 200);
   } else {
-    setTimeout(() => $('tree-run').click(), 100);
+    const ready = setInterval(() => {
+      if (!$('tree-run').disabled) { clearInterval(ready); $('tree-run').click(); }
+    }, 100);
   }
 }

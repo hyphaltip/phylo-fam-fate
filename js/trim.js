@@ -2,6 +2,8 @@
 import { parseFasta, toFasta } from './api.js';
 
 const GAP_CHARS = new Set(['-', '.', '?', '~']);
+const GAP_CODES = new Uint8Array(128);
+for (const c of GAP_CHARS) GAP_CODES[c.charCodeAt(0)] = 1;
 
 /**
  * Trim an alignment.
@@ -19,20 +21,23 @@ export function trimAlignment(fasta, opts) {
     throw new Error('Alignment is not rectangular — cannot trim');
   }
 
-  // Column statistics
-  const cols = [];
+  // Column statistics: one pass over each sequence with a reusable count
+  // table (much faster than per-column objects on large alignments).
+  const seqs = records.map(r => r.seq.toUpperCase());
+  const counts = new Uint32Array(128);
+  const cols = new Array(nPos);
   for (let i = 0; i < nPos; i++) {
-    let gaps = 0;
-    const counts = {};
-    for (const r of records) {
-      const c = r.seq[i].toUpperCase();
-      if (GAP_CHARS.has(c)) gaps++;
-      else counts[c] = (counts[c] || 0) + 1;
+    counts.fill(0);
+    let gaps = 0, maxCount = 0;
+    for (let k = 0; k < nSeq; k++) {
+      const code = seqs[k].charCodeAt(i) & 127;
+      if (GAP_CODES[code]) { gaps++; continue; }
+      const c = ++counts[code];
+      if (c > maxCount) maxCount = c;
     }
     const gapFrac = gaps / nSeq;
-    const maxCount = Math.max(0, ...Object.values(counts));
     const conservation = nSeq > gaps ? maxCount / (nSeq - gaps) : 0;
-    cols.push({ i, gapFrac, conservation });
+    cols[i] = { i, gapFrac, conservation };
   }
 
   // Decide which columns to keep
@@ -49,6 +54,9 @@ export function trimAlignment(fasta, opts) {
     while (end > start && GAP_CHARS.has(lastSeq[keep[end - 1].i])) end--;
   }
   const selected = keep.slice(start, end);
+  if (!selected.length) {
+    throw new Error('These thresholds remove every column — raise the gap threshold or lower min conservation');
+  }
 
   const trimmed = records.map(r => ({
     name: r.name,

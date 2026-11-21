@@ -83,8 +83,17 @@ Each step's elapsed time is printed to the browser console
 (`[phylo-fam-fate] …`) and shown in the **timing strip** above the pipeline.
 The same numbers appear in the run metadata table and in the exported JSON.
 
+### Tree inference and viewer
+FastTree runs in a Web Worker (`js/fasttree-worker.js`), so the page stays
+responsive during long inferences; a live timer and **Cancel** button appear
+while it runs. The tree view supports midpoint rooting, ladderizing, a
+cladogram layout, toggling support values, highlighting tips by name, and
+exporting SVG or Newick. Aligned and trimmed alignments are shown in a
+colored viewer and can be downloaded as FASTA.
+
 ### Troubleshooting / debug log
-A **Debug log** panel is pinned to the bottom-right of the page. It captures
+A **Debug log** panel is pinned (collapsed) to the bottom-right of the page; a
+red badge counts errors. It captures
 console warnings/errors, uncaught exceptions, FastTree arguments and input
 preview, and each step's timing. Use **Copy log** to share it. Step failures
 also appear inline, directly underneath the relevant step (so an error at the

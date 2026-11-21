@@ -21,18 +21,27 @@
 
 <main class="container">
 
+  <!-- Sticky progress tracker: mirrors each step's status chip -->
+  <nav class="stepper" id="stepper" aria-label="Pipeline progress">
+    <a href="#step-input" data-step="input"><span class="dot">1</span>Input<small id="nav-input">waiting</small></a>
+    <a href="#step-search" data-step="search"><span class="dot">2</span>Search<small id="nav-search">optional</small></a>
+    <a href="#step-align" data-step="align"><span class="dot">3</span>Align<small id="nav-align">waiting</small></a>
+    <a href="#step-trim" data-step="trim"><span class="dot">4</span>Trim<small id="nav-trim">waiting</small></a>
+    <a href="#step-tree" data-step="tree"><span class="dot">5</span>Tree<small id="nav-tree">loading…</small></a>
+  </nav>
+
   <!-- Status bar -->
   <div id="global-status" class="status-bar"></div>
   <div id="timing-strip" class="timing-strip"></div>
 
   <!-- Always-visible debug log: console output, errors, WASM details -->
-  <div id="debug-panel" class="debug-panel">
+  <div id="debug-panel" class="debug-panel collapsed">
     <div class="debug-header">
-      <strong>Debug log</strong>
+      <strong>Debug log</strong> <span class="badge hidden" id="debug-badge">0</span>
       <span class="hint">console output, errors, WASM details</span>
       <button class="btn small" id="debug-copy" type="button">Copy log</button>
       <button class="btn small" id="debug-clear" type="button">Clear</button>
-      <button class="btn small" id="debug-toggle" type="button">Hide</button>
+      <button class="btn small" id="debug-toggle" type="button">Show</button>
     </div>
     <pre id="debug-log"></pre>
   </div>
@@ -57,6 +66,8 @@
           <strong>Drop a FASTA file here</strong> or click to browse
           <div class="hint" id="file-info"></div>
         </div>
+        <p class="hint">No data handy? <button class="btn small ghost" id="load-example-aa" type="button">Load example proteins</button>
+          <button class="btn small ghost" id="load-example-nt" type="button">Load example nucleotide alignment</button></p>
       </div>
 
       <div class="tab-panel hidden" id="tab-paste">
@@ -167,6 +178,7 @@
             <tbody id="hit-table-body"></tbody>
           </table>
           <div class="row hit-footer">
+            <label class="checkbox inline"><input type="checkbox" id="hit-include-query" checked> Include query sequence(s)</label>
             <span class="hint" id="hit-summary"></span>
             <button class="btn primary small" id="hit-use-selected" type="button">Use selected for alignment →</button>
           </div>
@@ -199,7 +211,8 @@
         </label>
         <button class="btn" id="align-run">Align</button>
       </div>
-      <div id="align-preview" class="preview hidden"></div>
+      <div id="align-preview" class="msa-view hidden"></div>
+      <div class="row hidden" id="align-actions"><button class="btn small ghost" id="align-download" type="button">Download aligned FASTA</button></div>
     </div>
   </section>
 
@@ -215,10 +228,11 @@
         <label>Gap threshold <input type="range" id="trim-gap" min="0" max="1" step="0.05" value="0.5"><span id="trim-gap-val">0.50</span></label>
         <label>Min conservation <input type="range" id="trim-cons" min="0" max="1" step="0.05" value="0"><span id="trim-cons-val">0.00</span></label>
         <label><input type="checkbox" id="trim-ends"> Trim trailing/leading gaps</label>
-        <button class="btn" id="trim-run">Trim</button>
+        <button class="btn" id="trim-run" disabled>Trim</button>
       </div>
       <div id="trim-stats" class="stats hidden"></div>
-      <div id="trim-preview" class="preview hidden"></div>
+      <div id="trim-preview" class="msa-view hidden"></div>
+      <div class="row hidden" id="trim-actions"><button class="btn small ghost" id="trim-download" type="button">Download trimmed FASTA</button></div>
     </div>
   </section>
 
@@ -240,20 +254,32 @@
             <option value="wag">Protein (WAG)</option>
           </select>
         </label>
-        <label><input type="checkbox" id="tree-gtr"> GTR (nt)</label>
+        <label id="tree-gtr-wrap"><input type="checkbox" id="tree-gtr"> GTR (nt)</label>
         <label><input type="checkbox" id="tree-gamma"> Gamma rates</label>
         <label><input type="checkbox" id="tree-nosupport"> No support values</label>
         <button class="btn primary" id="tree-run" disabled>Build tree</button>
+        <button class="btn danger hidden" id="tree-cancel" type="button">Cancel</button>
+        <span class="hint running-timer hidden" id="tree-elapsed"></span>
       </div>
+      <p class="hint" id="tree-input-note">The tree uses the most processed data available: trimmed → aligned → input.</p>
       <div id="tree-results" class="hidden">
-        <h3>Newick</h3>
-        <pre class="newick" id="newick-output"></pre>
-        <div class="row">
-          <button class="btn" id="newick-copy">Copy</button>
-          <button class="btn" id="newick-download">Download .nwk</button>
+        <div class="tree-toolbar">
+          <label class="checkbox inline"><input type="checkbox" id="tv-midpoint" checked> Midpoint root</label>
+          <label class="checkbox inline"><input type="checkbox" id="tv-ladderize" checked> Ladderize</label>
+          <label class="checkbox inline"><input type="checkbox" id="tv-cladogram"> Cladogram</label>
+          <label class="checkbox inline"><input type="checkbox" id="tv-support" checked> Support values</label>
+          <input type="search" id="tv-find" placeholder="Find tip…" aria-label="Find tip">
+          <span class="hint" id="tv-find-count"></span>
+          <span class="spacer"></span>
+          <button class="btn small ghost" id="svg-download" type="button">SVG</button>
+          <button class="btn small ghost" id="newick-download" type="button">Newick</button>
+          <button class="btn small ghost" id="newick-copy" type="button">Copy Newick</button>
         </div>
-        <h3>Tree view</h3>
-        <svg id="tree-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+        <div class="tree-scroll"><svg id="tree-svg" xmlns="http://www.w3.org/2000/svg"></svg></div>
+        <details class="newick-details">
+          <summary>Raw Newick</summary>
+          <pre class="newick" id="newick-output"></pre>
+        </details>
       </div>
     </div>
   </section>

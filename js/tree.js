@@ -1,5 +1,7 @@
 /* Newick parser and SVG phylogenetic tree renderer. */
 
+const NUMERIC = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
+
 /** Parse a Newick string into a nested tree object. */
 export function parseNewick(s) {
   s = s.trim();
@@ -9,11 +11,15 @@ export function parseNewick(s) {
     let label = '';
     if (s[pos] === "'" || s[pos] === '"') {
       const quote = s[pos++];
-      while (pos < s.length && s[pos] !== quote) {
-        if (s[pos] === "''") label += "'", pos += 2;
-        else label += s[pos++];
+      while (pos < s.length) {
+        if (s[pos] === quote) {
+          if (s[pos + 1] === quote) { label += quote; pos += 2; continue; } // escaped ''
+          break;
+        }
+        label += s[pos++];
       }
       pos++; // closing quote
+      return label;
     } else {
       while (pos < s.length && !':(),;[]'.includes(s[pos])) label += s[pos++];
     }
@@ -40,8 +46,9 @@ export function parseNewick(s) {
       pos++; // ')'
       const label = readLabel();
       if (label) {
-        const num = parseFloat(label);
-        if (!isNaN(num) && label === String(num)) node.support = num;
+        // FastTree writes support as e.g. "0.950"; String(0.95) !== "0.950",
+        // so test the lexical form rather than round-tripping the number.
+        if (NUMERIC.test(label)) node.support = parseFloat(label);
         else node.name = label;
       }
     } else {
@@ -82,38 +89,115 @@ export function treeStats(root) {
 }
 
 /**
+ * Midpoint-root a tree: place the root halfway along the longest tip-to-tip
+ * path. FastTree trees are unrooted (drawn from an arbitrary trifurcation),
+ * so this usually gives a far more readable picture. Support values describe
+ * edges, so they travel with their edge when the direction flips.
+ */
+export function midpointRoot(root) {
+  // Undirected adjacency: each edge {a, b, len, support}
+  const nodes = collectAll(root);
+  const adj = new Map(nodes.map(n => [n, []]));
+  for (const n of nodes) {
+    for (const c of n.children) {
+      const e = { len: c.length, support: c.support };
+      adj.get(n).push({ to: c, e });
+      adj.get(c).push({ to: n, e });
+    }
+  }
+  const leaves = nodes.filter(n => !n.children.length);
+  if (leaves.length < 3) return root;
+
+  function farthest(from) {
+    const dist = new Map([[from, 0]]), prev = new Map();
+    const stack = [from];
+    while (stack.length) {
+      const u = stack.pop();
+      for (const { to, e } of adj.get(u)) {
+        if (dist.has(to)) continue;
+        dist.set(to, dist.get(u) + e.len);
+        prev.set(to, { u, e });
+        stack.push(to);
+      }
+    }
+    let best = from;
+    for (const l of leaves) if (dist.get(l) > dist.get(best)) best = l;
+    return { best, dist, prev };
+  }
+  const A = farthest(leaves[0]).best;
+  const { best: B, dist, prev } = farthest(A);
+  const half = dist.get(B) / 2;
+  if (!(half > 0)) return root;
+
+  // Walk back from B toward A until we cross the midpoint.
+  let v = B;
+  while (prev.has(v) && dist.get(prev.get(v).u) > half) v = prev.get(v).u;
+  const { u, e } = prev.get(v);          // midpoint lies on edge u—v
+  const toV = dist.get(v) - half;         // distance from midpoint to v
+  const toU = e.len - toV;
+
+  function build(node, parent, length, support) {
+    const out = { name: node.name, length, support, children: [] };
+    for (const { to, e: edge } of adj.get(node)) {
+      if (to === parent || edge === e) continue;
+      out.children.push(build(to, node, edge.len, edge.support));
+    }
+    // A node that lost its only other neighbour keeps no stale support label
+    if (!out.children.length) out.support = null;
+    return out;
+  }
+  return {
+    name: '', length: 0, support: null,
+    children: [build(v, u, toV, e.support), build(u, v, toU, e.support)],
+  };
+}
+
+/** Sort children so larger clades come last ("ladderize"), like FigTree. */
+export function ladderize(node) {
+  if (!node.children.length) return 1;
+  const sizes = new Map(node.children.map(c => [c, ladderize(c)]));
+  node.children.sort((a, b) => sizes.get(a) - sizes.get(b));
+  return [...sizes.values()].reduce((x, y) => x + y, 0);
+}
+
+/**
  * Render a tree into an SVG element.
  * @param {SVGSVGElement} svg
  * @param {object} root - parsed tree
- * @param {object} opts - {width, showSupport, showLength, colorBy}
+ * @param {object} opts - {width, showSupport, cladogram, highlight, labelChars}
  */
 export function drawTree(svg, root, opts = {}) {
-  opts = { showSupport: true, showScale: true, ...opts };
+  opts = { showSupport: true, showScale: true, cladogram: false, highlight: '', labelChars: 40, ...opts };
   const stats = treeStats(root);
 
-  // Compute cumulative x positions (branch lengths) and depth (topology)
+  // Leaf depth in edges, used for cladogram layout (tips aligned at the right)
+  function height(node) {
+    node._h = node.children.length ? 1 + Math.max(...node.children.map(height)) : 0;
+    return node._h;
+  }
+  height(root);
+
   function assign(node, x, depth) {
     node._x0 = x;
     node._depth = depth;
-    const childX = x + node.length;
-    node.children.forEach(c => assign(c, childX, depth + 1));
+    node.children.forEach(c => assign(c, x + c.length, depth + 1));
   }
   assign(root, 0, 0);
 
-  // For a cladogram (no meaningful lengths), use depth as x
-  const useLength = stats.totalLength > 0.001;
-  const maxX = useLength
-    ? Math.max(...collectAll(root).map(n => n._x0 + n.length))
-    : stats.maxDepth;
+  const useLength = !opts.cladogram && stats.totalLength > 1e-9;
+  const all = collectAll(root);
+  const xOf = n => useLength ? n._x0 : root._h - n._h;
+  const maxX = useLength ? Math.max(...all.map(n => n._x0)) : root._h;
 
-  const width = opts.width || Math.max(700, svg.parentElement?.clientWidth - 4 || 900);
-  const rowH = Math.max(20, Math.min(38, 520 / Math.max(1, stats.tips)));
-  const height = stats.tips * rowH + 70;
-  const margin = { top: 25, right: 210, bottom: 35, left: 20 };
-  const treeW = width - margin.left - margin.right - (opts.showScale ? 30 : 0);
+  const longest = Math.min(opts.labelChars, Math.max(4, ...stats.names.map(n => n.length)));
+  const fontPx = stats.tips > 400 ? 9 : stats.tips > 150 ? 10.5 : 12;
+  const width = opts.width || Math.max(640, (svg.parentElement?.clientWidth || 900) - 4);
+  const rowH = Math.max(fontPx + 3, Math.min(30, 560 / Math.max(1, stats.tips)));
+  const margin = { top: 20, right: Math.min(width * 0.45, 14 + longest * fontPx * 0.62), bottom: useLength ? 40 : 15, left: 16 };
+  const height_ = stats.tips * rowH + margin.top + margin.bottom;
+  const treeW = Math.max(60, width - margin.left - margin.right);
   const xScale = treeW / (maxX || 1);
 
-  // Leaf y positions, internal nodes at mean of children
   let leafIdx = 0;
   function layoutY(node) {
     if (!node.children.length) {
@@ -122,65 +206,90 @@ export function drawTree(svg, root, opts = {}) {
       node.children.forEach(layoutY);
       node._y = (node.children[0]._y + node.children[node.children.length - 1]._y) / 2;
     }
-    node._px = margin.left + (useLength ? node._x0 : node._depth) * xScale;
+    node._px = margin.left + xOf(node) * xScale;
   }
   layoutY(root);
 
+  const q = opts.highlight.trim().toLowerCase();
+  let matches = 0;
   const parts = [];
 
-  // Grid lines / scale axis
   if (opts.showScale && useLength) {
     const niceStep = niceTick(maxX / 6);
-    for (let v = 0; v <= maxX; v += niceStep) {
+    for (let v = 0; v <= maxX + 1e-12; v += niceStep) {
       const x = margin.left + v * xScale;
-      parts.push(`<line x1="${x}" y1="${margin.top - 8}" x2="${x}" y2="${height - margin.bottom + 5}" stroke="#eef2f7" stroke-width="1"/>`);
-      parts.push(`<text x="${x}" y="${height - margin.bottom + 20}" font-size="10" fill="#94a3b8" text-anchor="middle">${formatTick(v)}</text>`);
+      parts.push(`<line x1="${x}" y1="${margin.top - 8}" x2="${x}" y2="${height_ - margin.bottom + 5}" class="t-grid"/>`);
+      parts.push(`<text x="${x}" y="${height_ - margin.bottom + 19}" class="t-tick" text-anchor="middle">${formatTick(v)}</text>`);
     }
-    parts.push(`<text x="${margin.left + treeW / 2}" y="${height - 5}" font-size="11" fill="#64748b" text-anchor="middle">substitutions / site</text>`);
+    parts.push(`<text x="${margin.left + treeW / 2}" y="${height_ - 4}" class="t-axis" text-anchor="middle">substitutions / site</text>`);
   }
 
-  // Edges
-  function edges(node) {
+  const edgeParts = [];
+  for (const node of all) {
     for (const c of node.children) {
-      const cx = margin.left + (useLength ? c._x0 : c._depth) * xScale;
-      // elbow connector
-      parts.push(`<path d="M ${node._px} ${node._y} L ${node._px} ${c._y} L ${cx} ${c._y}" fill="none" stroke="#475569" stroke-width="1.4" stroke-linejoin="round"/>`);
-      edges(c);
+      edgeParts.push(`M${node._px.toFixed(1)} ${c._y.toFixed(1)}H${c._px.toFixed(1)}`);
+    }
+    if (node.children.length > 1) {
+      const ys = node.children.map(c => c._y);
+      edgeParts.push(`M${node._px.toFixed(1)} ${Math.min(...ys).toFixed(1)}V${Math.max(...ys).toFixed(1)}`);
     }
   }
-  edges(root);
+  parts.push(`<path d="${edgeParts.join('')}" class="t-edge"/>`);
 
-  // Support values on internal branches
   if (opts.showSupport) {
-    function supports(node) {
-      if (node.support !== null && node.children.length) {
-        parts.push(`<text x="${node._px - 3}" y="${node._y - 4}" font-size="9" fill="#7c3aed" text-anchor="end" font-weight="600">${node.support}</text>`);
-      }
-      node.children.forEach(supports);
+    for (const node of all) {
+      if (node.support === null || !node.children.length || node === root) continue;
+      const weak = node.support < 0.7 || (node.support > 1 && node.support < 70);
+      parts.push(`<text x="${(node._px - 3).toFixed(1)}" y="${(node._y - 4).toFixed(1)}" class="t-support${weak ? ' weak' : ''}" text-anchor="end">${formatSupport(node.support)}</text>`);
     }
-    supports(root);
   }
 
-  // Leaf labels with hover tooltip
-  function labels(node) {
-    if (!node.children.length) {
-      const y = node._y;
-      parts.push(`<circle cx="${node._px}" cy="${y}" r="2.5" fill="#2563eb"/>`);
-      parts.push(`<text x="${node._px + 7}" y="${y + 4}" font-size="12" font-family="ui-monospace,monospace" fill="#1e293b"><title>${escapeXml(node.name)}</title>${escapeXml(truncate(node.name, 32))}</text>`);
+  for (const node of all) {
+    if (node.children.length) continue;
+    const hit = q && node.name.toLowerCase().includes(q);
+    if (hit) matches++;
+    const y = node._y;
+    const labelX = useLength ? node._px : margin.left + treeW;
+    if (!useLength && labelX > node._px) {
+      parts.push(`<line x1="${node._px}" y1="${y}" x2="${labelX}" y2="${y}" class="t-guide"/>`);
     }
-    node.children.forEach(labels);
+    if (hit) parts.push(`<rect x="${labelX + 4}" y="${y - rowH / 2 + 1}" width="${Math.min(longest, node.name.length) * fontPx * 0.62 + 6}" height="${rowH - 2}" rx="3" class="t-hit"/>`);
+    parts.push(`<circle cx="${labelX}" cy="${y}" r="2.4" class="t-tip"/>`);
+    parts.push(`<text x="${labelX + 7}" y="${y + fontPx * 0.35}" class="t-label" font-size="${fontPx}"><title>${escapeXml(node.name)}</title>${escapeXml(truncate(node.name, opts.labelChars))}</text>`);
   }
-  labels(root);
 
-  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-  svg.setAttribute('preserveAspectRatio', 'xMinYMin meet');
-  svg.innerHTML = parts.join('');
-  return { width, height, stats };
+  svg.setAttribute('viewBox', `0 0 ${width} ${height_}`);
+  svg.setAttribute('width', width);
+  svg.setAttribute('height', height_);
+  svg.innerHTML = `<style>${TREE_CSS}</style>` + parts.join('');
+  return { width, height: height_, stats, matches };
 }
 
-function collectAll(node) {
-  const out = [node];
-  node.children.forEach(c => out.push(...collectAll(c)));
+/* Inlined so a downloaded SVG looks the same as on screen. */
+const TREE_CSS = `
+.t-edge{fill:none;stroke:#334155;stroke-width:1.4;stroke-linecap:square}
+.t-grid{stroke:#eef2f7;stroke-width:1}
+.t-guide{stroke:#cbd5e1;stroke-width:0.8;stroke-dasharray:2 3}
+.t-tick{font:10px system-ui,sans-serif;fill:#94a3b8}
+.t-axis{font:11px system-ui,sans-serif;fill:#64748b}
+.t-support{font:600 9px system-ui,sans-serif;fill:#7c3aed}
+.t-support.weak{fill:#94a3b8;font-weight:400}
+.t-tip{fill:#2563eb}
+.t-label{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;fill:#1e293b}
+.t-hit{fill:#fde68a}
+`;
+
+function formatSupport(v) {
+  return v <= 1 ? v.toFixed(2).replace(/^0/, '') : String(Math.round(v));
+}
+
+function collectAll(root) {
+  const out = [], stack = [root];
+  while (stack.length) {
+    const n = stack.pop();
+    out.push(n);
+    for (let i = n.children.length - 1; i >= 0; i--) stack.push(n.children[i]);
+  }
   return out;
 }
 function niceTick(x) {

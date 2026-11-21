@@ -26,7 +26,7 @@ export function parseFasta(text) {
 }
 
 export function toFasta(records) {
-  return records.map(r => `>${r.name}\n${r.seq.match(/.{1,80}/g).join('\n')}`).join('\n') + '\n';
+  return records.map(r => `>${r.name}\n${(r.seq.match(/.{1,80}/g) || ['']).join('\n')}`).join('\n') + '\n';
 }
 
 async function fetchJson(url) {
