@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>phylo-fam-fate — browser phylogenetics workbench</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header>
+  <div class="container">
+    <h1>phylo-fam-fate</h1>
+    <p>Search → align → trim → infer. All in your browser.</p>
+    <nav>
+      <a href="#pipeline">Pipeline</a>
+      <a href="#metadata">Metadata</a>
+      <a href="https://github.com/hyphaltip/phylo-fam-fate">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main class="container">
+
+  <!-- Status bar -->
+  <div id="global-status" class="status-bar"></div>
+
+  <!-- STEP 1: Input -->
+  <section class="step" id="step-input">
+    <div class="step-header">
+      <span class="step-num">1</span>
+      <h2>Input sequences</h2>
+      <span class="step-status" id="status-input">waiting</span>
+    </div>
+    <div class="step-body">
+      <div class="tabs" id="input-tabs">
+        <button class="active" data-tab="upload">Upload FASTA</button>
+        <button data-tab="paste">Paste FASTA</button>
+        <button data-tab="remote">Retrieve from API</button>
+      </div>
+
+      <div class="tab-panel" id="tab-upload">
+        <div class="dropzone" id="dropzone">
+          <input type="file" id="file-input" accept=".fa,.fasta,.fas,.fna,.ffn,.faa,.txt">
+          <strong>Drop a FASTA file here</strong> or click to browse
+          <div class="hint" id="file-info"></div>
+        </div>
+      </div>
+
+      <div class="tab-panel hidden" id="tab-paste">
+        <textarea id="paste-fasta" placeholder=">seq1&#10;ACGT...&#10;>seq2&#10;ACGT..."></textarea>
+      </div>
+
+      <div class="tab-panel hidden" id="tab-remote">
+        <div class="row">
+          <label>Source
+            <select id="api-source">
+              <option value="uniprot">UniProt (protein)</option>
+              <option value="ncbi-protein">NCBI Protein</option>
+              <option value="ncbi-nucleotide">NCBI Nucleotide</option>
+              <option value="interpro">InterPro (family → sequences)</option>
+            </select>
+          </label>
+          <label>Query <input type="text" id="api-query" placeholder="kinase OR (organism:human)" style="width:24rem"></label>
+          <label>Limit <input type="number" id="api-limit" value="25" min="1" max="500"></label>
+          <button class="btn" id="api-fetch">Retrieve</button>
+        </div>
+        <p class="hint" id="api-hint">UniProt: free-text query. NCBI: Entrez query syntax. InterPro: entry accession (e.g. PF00069).</p>
+        <pre class="preview hidden" id="api-preview"></pre>
+      </div>
+
+      <div class="sequence-summary" id="sequence-summary"></div>
+    </div>
+  </section>
+
+  <!-- STEP 2: Search (optional) -->
+  <section class="step" id="step-search">
+    <div class="step-header">
+      <span class="step-num">2</span>
+      <h2>Search (optional)</h2>
+      <span class="step-status" id="status-search">skipped</span>
+    </div>
+    <div class="step-body">
+      <label class="checkbox"><input type="checkbox" id="search-enable"> Enable local similarity search</label>
+      <div id="search-options" class="hidden">
+        <div class="row">
+          <label>Tool
+            <select id="search-tool">
+              <option value="blastp">BLASTP (protein)</option>
+              <option value="blastn">BLASTN (nucleotide)</option>
+              <option value="phmmer">phmmer (protein, HMMER)</option>
+            </select>
+          </label>
+          <label>Database (FASTA) <input type="file" id="search-db" accept=".fa,.fasta,.fas,.fna,.faa"></label>
+          <label>Max hits <input type="number" id="search-maxhits" value="50" min="1" max="500"></label>
+          <button class="btn" id="search-run">Run search</button>
+        </div>
+        <p class="hint">The database is a FASTA file you provide. It stays on your device. Biowasm builds a local index in-browser.</p>
+        <pre class="preview hidden" id="search-preview"></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- STEP 3: Align -->
+  <section class="step" id="step-align">
+    <div class="step-header">
+      <span class="step-num">3</span>
+      <h2>Multiple sequence alignment</h2>
+      <span class="step-status" id="status-align">waiting</span>
+    </div>
+    <div class="step-body">
+      <div class="row">
+        <label>Aligner
+          <select id="align-tool">
+            <option value="kalign">Kalign</option>
+            <option value="muscle">MUSCLE</option>
+          </select>
+        </label>
+        <label>Input
+          <select id="align-input">
+            <option value="original">Original sequences</option>
+            <option value="search">Search hits</option>
+          </select>
+        </label>
+        <button class="btn" id="align-run">Align</button>
+      </div>
+      <div id="align-preview" class="preview hidden"></div>
+    </div>
+  </section>
+
+  <!-- STEP 4: Trim -->
+  <section class="step" id="step-trim">
+    <div class="step-header">
+      <span class="step-num">4</span>
+      <h2>Trim alignment</h2>
+      <span class="step-status" id="status-trim">waiting</span>
+    </div>
+    <div class="step-body">
+      <div class="row">
+        <label>Gap threshold <input type="range" id="trim-gap" min="0" max="1" step="0.05" value="0.5"><span id="trim-gap-val">0.50</span></label>
+        <label>Min conservation <input type="range" id="trim-cons" min="0" max="1" step="0.05" value="0"><span id="trim-cons-val">0.00</span></label>
+        <label><input type="checkbox" id="trim-ends"> Trim trailing/leading gaps</label>
+        <button class="btn" id="trim-run">Trim</button>
+      </div>
+      <div id="trim-stats" class="stats hidden"></div>
+      <div id="trim-preview" class="preview hidden"></div>
+    </div>
+  </section>
+
+  <!-- STEP 5: Tree -->
+  <section class="step" id="step-tree">
+    <div class="step-header">
+      <span class="step-num">5</span>
+      <h2>Infer phylogenetic tree</h2>
+      <span class="step-status" id="status-tree">waiting</span>
+    </div>
+    <div class="step-body">
+      <div class="row">
+        <label>Model
+          <select id="tree-model">
+            <option value="auto">Auto (nt/protein)</option>
+            <option value="nt">Nucleotide</option>
+            <option value="protein">Protein (JTT)</option>
+            <option value="lg">Protein (LG)</option>
+            <option value="wag">Protein (WAG)</option>
+          </select>
+        </label>
+        <label><input type="checkbox" id="tree-gtr"> GTR (nt)</label>
+        <label><input type="checkbox" id="tree-gamma"> Gamma rates</label>
+        <label><input type="checkbox" id="tree-nosupport"> No support values</label>
+        <button class="btn primary" id="tree-run" disabled>Build tree</button>
+      </div>
+      <div id="tree-results" class="hidden">
+        <h3>Newick</h3>
+        <pre class="newick" id="newick-output"></pre>
+        <div class="row">
+          <button class="btn" id="newick-copy">Copy</button>
+          <button class="btn" id="newick-download">Download .nwk</button>
+        </div>
+        <h3>Tree view</h3>
+        <svg id="tree-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+      </div>
+    </div>
+  </section>
+
+  <!-- Metadata -->
+  <section class="step" id="metadata">
+    <div class="step-header">
+      <span class="step-num">ℹ</span>
+      <h2>Run metadata</h2>
+      <button class="btn small" id="metadata-export">Export JSON</button>
+    </div>
+    <div class="step-body">
+      <table class="metadata-table" id="metadata-table">
+        <thead><tr><th>Step</th><th>Tool</th><th>Version</th><th>Parameters</th><th>Input</th><th>Output</th><th>Time</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<footer class="container">
+  <p>phylo-fam-fate · <a href="https://github.com/hyphaltip/phylo-fasttree-wasm">FastTree WASM</a> · <a href="https://biowasm.com">Biowasm</a> · <a href="https://github.com/hyphaltip/phylo-fam-fate">Source</a></p>
+</footer>
+
+<script src="https://biowasm.com/cdn/v3/aioli.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

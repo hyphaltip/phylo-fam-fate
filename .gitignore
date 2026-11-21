@@ -1,0 +1,4 @@
+# No build step; ignore local dev artifacts
+.DS_Store
+*.log
+__pycache__/
