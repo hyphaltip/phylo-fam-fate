@@ -11,7 +11,7 @@
  *                   [--root midpoint|mad|none|outgroup:RANK:NAME]
  *                   [--rank phylum] [--label id|species|id-species|gene|protein]
  *                   [--no-annotate] [--no-domains] [--width 1100]
- *   famfate-js fasttree-wasm ALN.fa [FastTree args…]               > tree.nwk
+ *   famfate-js fasttree-wasm ALN.fa [--double] [FastTree args…]    > tree.nwk
  *   famfate-js compare-trees A.nwk B.nwk [--tol 1e-4]              (exit 1 if different)
  */
 import fs from 'node:fs';
@@ -72,10 +72,13 @@ switch (cmd) {
     break;
 
   case 'fasttree-wasm': {
-    if (!pos[0]) die('usage: fasttree-wasm ALN.fa [FastTree args…]');
-    const ft = await mod('assets/fasttree/phylo_fasttree_wasm.js');
-    ft.initSync(fs.readFileSync(path.join(SITE, 'assets/fasttree/phylo_fasttree_wasm_bg.wasm')));
-    const args = process.argv.slice(4);       // pass FastTree flags through verbatim
+    if (!pos[0]) die('usage: fasttree-wasm ALN.fa [--double] [FastTree args…]');
+    let args = process.argv.slice(4);         // pass FastTree flags through verbatim
+    const double = args.includes('--double');
+    args = args.filter(a => a !== '--double');
+    const base = double ? 'phylo_fasttree_wasm_double' : 'phylo_fasttree_wasm';
+    const ft = await mod(`assets/fasttree/${base}.js`);
+    ft.initSync(fs.readFileSync(path.join(SITE, `assets/fasttree/${base}_bg.wasm`)));
     process.stdout.write(ft.buildTree(read(pos[0]), args).trim() + '\n');
     break;
   }

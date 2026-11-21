@@ -268,6 +268,12 @@
         </label>
         <label id="tree-gtr-wrap"><input type="checkbox" id="tree-gtr"> GTR (nt)</label>
         <label><input type="checkbox" id="tree-gamma"> Gamma rates</label>
+        <label title="FastTree's default is single precision. Double precision (-DUSE_DOUBLE, like bioconda's FastTree) allows much shorter minimum branch lengths: use it for very similar sequences. In WebAssembly both run at the same speed; double uses more memory.">Precision
+          <select id="tree-precision">
+            <option value="single" selected>Single (FastTree default)</option>
+            <option value="double">Double (very similar sequences)</option>
+          </select>
+        </label>
         <label><input type="checkbox" id="tree-nosupport"> No support values</label>
         <button class="btn primary" id="tree-run" disabled>Build tree</button>
         <button class="btn danger hidden" id="tree-cancel" type="button">Cancel</button>

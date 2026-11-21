@@ -58,7 +58,7 @@ Tool versions used in the browser and pinned in the CLI container:
 | Align | Kalign | 3.3.1 | 3.3.2 (3.3.1 isn't on bioconda) |
 | Align | MUSCLE | 5.1.0 | 5.1.0 |
 | Trim | site's JS (`js/trim.js`) | — | same code, run by Node |
-| Tree | FastTree, via [phylo-fasttree-wasm](https://github.com/hyphaltip/phylo-fasttree-wasm) | 2.1.11 single precision | 2.1.11 `FastTree-browser` (default: byte-identical to the site, checked in CI) or bioconda's double-precision `FastTree`/`FastTreeMP` (`--fasttree double`) |
+| Tree | FastTree, via [phylo-fasttree-wasm](https://github.com/hyphaltip/phylo-fasttree-wasm) | 2.1.11, single (default) or double precision | 2.1.11 `FastTree-browser` (default: byte-identical to the site's single precision) or bioconda's `FastTree`/`FastTreeMP` (`--fasttree double`: matches the site's double precision) |
 | Root / annotate / duplications / export | site's JS (`js/tree.js`, `js/annotate.js`, `js/export.js`) | — | same code, run by Node |
 
 The command-line tool is described in
@@ -328,6 +328,15 @@ for n, s in zip(names, seqs):
   - *Protein (JTT)*, *Protein (LG)* or *Protein (WAG)*.
 - **Gamma rates**: `-gamma`, a discrete-gamma-rescaled likelihood. Use it when
   you want branch lengths and likelihoods comparable across runs.
+- **Precision**: *Single* (FastTree's default) or *Double* (`-DUSE_DOUBLE`,
+  the build bioconda ships).
+  - Double allows much shorter minimum branch lengths, so choose it for very
+    similar sequences (e.g. strains of one species, recent paralogs).
+  - Nucleotide trees with near-zero branches can differ between the two;
+    protein trees usually differ only in the 4th decimal place.
+  - In WebAssembly both run at the same speed (single precision is faster
+    natively only because of SSE code, which the WASM build doesn't use).
+    Double needs more memory, and its 307 KB module loads only when selected.
 - **No support values**: `-nosupport`. Otherwise you get FastTree's SH-like
   local support (0–1, from 1000 resamples).
 - **Build tree** runs FastTree in a background worker. A timer and a
@@ -348,12 +357,13 @@ FastTree -nt -gtr -gamma family.trim.fa > family.nwk          # nucleotide GTR
 # For publication, consider ML with ultrafast bootstrap: iqtree2 -s family.trim.fa -m MFP -B 1000 -T AUTO
 ```
 
-The browser runs FastTree 2.1.11 in **single precision**. To reproduce its
-trees exactly on the CLI, use a single-precision, strict-floating-point build
-(`cli/build-fasttree-browser.sh`, or `FastTree-browser` in the container).
-Bioconda's `fasttree` package is the double-precision variant: close, but
-nucleotide trees with short branches can differ. The exact arguments are
-recorded in the metadata table.
+To reproduce the browser's trees on the CLI, match its precision:
+- *Single* (the default): use a single-precision, strict-floating-point
+  build (`cli/build-fasttree-browser.sh`, or `FastTree-browser` in the
+  container). Trees are byte-identical.
+- *Double*: use bioconda's `fasttree`. Same topology, numbers within 1e-5.
+
+The exact arguments and precision are recorded in the metadata table.
 
 ### Step 6 · Rooting
 
@@ -530,9 +540,10 @@ lengths up to 0.09 apart with GTR+Γ; protein trees agreed to within 3e-4.
   `cli/build-fasttree-browser.sh`. Its trees are **byte-identical to the
   website's**, which CI checks.
 - **`--fasttree double`** uses bioconda's `FastTree`/`FastTreeMP`, the
-  double-precision build. It is multithreaded, and FastTree's author
-  recommends it for very similar sequences, but its trees won't exactly match
-  the website's.
+  double-precision build. It is multithreaded and matches the website's
+  **Precision → Double** option (CI checks that they give the same topology,
+  with numbers within 1e-5; the small differences come from different math
+  libraries).
 
 ### Get it
 
@@ -657,7 +668,7 @@ The container also puts `famfate-js` on the PATH:
 ```sh
 famfate-js trim ALN.fa --gap 0.5 --cons 0 > trimmed.fa         # browser trimming rule
 famfate-js post --tree T.nwk --fasta FAMILY.fa --root mad --out T # root + annotate + duplications + SVG/TSV/iTOL
-famfate-js fasttree-wasm ALN.fa -lg -gamma > tree.nwk             # the browser's FastTree WASM build
+famfate-js fasttree-wasm ALN.fa -lg -gamma > tree.nwk             # the browser's FastTree WASM build (add --double for double precision)
 famfate-js compare-trees A.nwk B.nwk --tol 1e-4                  # same unrooted topology? max branch-length difference
 famfate-js seqtype FASTA                                         # nt | aa (the browser's detection rule)
 ```
@@ -669,11 +680,13 @@ workflow builds the image and runs `cli/tests/ci.sh` inside it:
 
 1. **Offline pipeline:** family → Kalign → trim → FastTree, and MUSCLE/WAG
    without trimming.
-2. **FastTree parity:** `FastTree-browser` and the website's WASM build must
-   give **byte-identical** Newick on nucleotide (JC, GTR+Γ) and protein (JTT,
-   LG+Γ, WAG) alignments, and `famfate.sh`'s own tree must equal the
-   website's. Bioconda's double-precision build is compared as well, and the
-   difference is reported without failing the run.
+2. **FastTree parity**, on nucleotide (JC, GTR+Γ) and protein (JTT, LG+Γ,
+   WAG) alignments:
+   - `FastTree-browser` and the website's single-precision WASM must give
+     **byte-identical** Newick;
+   - bioconda's double-precision `FastTree` and the website's double WASM
+     must give the same topology, with numbers within 1e-5;
+   - `famfate.sh`'s own tree must equal the website's.
 3. **Live search:** MET12 against the *S. cerevisiae* and *E. coli*
    proteomes. It checks that:
    - all hits come back full-length;

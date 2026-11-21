@@ -42,19 +42,22 @@ section "2b. double-precision FastTree option"
 famfate.sh --family "$EX/proteins.fa" --fasttree double --no-annotate -o t2b -T 2 >/dev/null 2>t2b.err || { cat t2b.err; bad "pipeline ran"; }
 check "bioconda FastTree used"  grep -qE '"tool":"FastTree(MP)?"' t2b/run.json
 
-section "3. FastTree parity: FastTree-browser (native) vs the website's WASM build"
-# FastTree-browser is compiled like the WASM build (single precision, strict FP),
-# so its Newick must be byte-identical. Bioconda's double-precision FastTree is
-# compared too, for information only: it legitimately differs on short branches.
+section "3. FastTree parity: native builds vs the website's WASM builds"
+# Single precision: FastTree-browser is compiled like the website's default WASM
+# build (strict FP), so its Newick must be byte-identical.
+# Double precision: bioconda's FastTree vs the website's double WASM build.
+# Same topology required; numbers may differ slightly (bioconda vs Rust libm).
 parity() {   # parity NAME ALN ARGS…
   local name=$1 aln=$2; shift 2
   FastTree-browser "$@" "$aln" > "$name.native.nwk" 2>/dev/null || true
   famfate-js fasttree-wasm "$aln" "$@" > "$name.wasm.nwk" || true
-  check "$name [$*]: identical Newick" cmp -s "$name.native.nwk" "$name.wasm.nwk"
+  check "$name [$*] single: identical Newick" cmp -s "$name.native.nwk" "$name.wasm.nwk"
   FastTree "$@" "$aln" > "$name.double.nwk" 2>/dev/null || true
-  if famfate-js compare-trees "$name.double.nwk" "$name.wasm.nwk" > "$name.double.json"; then d="same tree"; else d="differs"; fi
-  printf '       info: bioconda double precision vs browser: %s (%s)\n' "$d" \
-    "$(grep -E 'sameTopology|maxLengthDiff' "$name.double.json" | tr -d ' \n')"
+  famfate-js fasttree-wasm "$aln" --double "$@" > "$name.wasm-double.nwk" || true
+  if cmp -s "$name.double.nwk" "$name.wasm-double.nwk"; then ok "$name [$*] double: identical Newick"
+  else check "$name [$*] double: same topology, lengths within 1e-5" \
+         famfate-js compare-trees "$name.double.nwk" "$name.wasm-double.nwk" --tol 1e-5
+  fi
 }
 parity nt_jc "$EX/nucleotide_aligned.fa" -nt
 parity nt_gtr_gamma "$EX/nucleotide_aligned.fa" -nt -gtr -gamma

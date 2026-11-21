@@ -1312,7 +1312,7 @@ $('tree-run').addEventListener('click', async () => {
 
   clearStepError('tree');
   debugLog(`buildTree: source=${source}, seqs=${recs.length}, length=${lengths[0]}, ` +
-    `args=[${args.join(' ') || 'defaults'}], model=${model}, type=${type}, version=${state.ftVersion}`);
+    `args=[${args.join(' ') || 'defaults'}], model=${model}, type=${type}, version=${state.ftVersion}, precision=${$('tree-precision').value}`);
   stepStatus('tree', 'running…', 'running');
   status(`Building tree with FastTree (${type === 'nt' ? 'nucleotide' : 'protein'}, ${recs.length} × ${lengths[0]})…`);
   $('tree-run').disabled = true;
@@ -1324,7 +1324,8 @@ $('tree-run').addEventListener('click', async () => {
   }, 100);
 
   try {
-    const { newick, ms } = await ftCall({ fasta, args });
+    const precision = $('tree-precision').value;
+    const { newick, ms } = await ftCall({ fasta, args, precision });
     state.newick = newick;
     state.tree = parseNewick(newick);
     const stats = treeStats(state.tree);
@@ -1343,10 +1344,10 @@ $('tree-run').addEventListener('click', async () => {
       if (!labels.every(l => state.annotations.has(l))) annotateTree({ quiet: true });
     }
     stepStatus('tree', `${stats.tips} tips`, 'done');
-    recordMeta('Tree', 'FastTree', state.ftVersion, args.join(' ') || '(defaults)',
+    recordMeta('Tree', 'FastTree', `${state.ftVersion} (${precision} precision)`, args.join(' ') || '(defaults)',
       `${recs.length} × ${lengths[0]} ${source} alignment`, `tree, ${stats.tips} tips`, ms);
     debugLog(`Tree OK: ${stats.tips} tips, ${newick.length} Newick chars`);
-    status(`Tree inferred: ${stats.tips} tips in ${(ms / 1000).toFixed(2)}s`, 'success');
+    status(`Tree inferred: ${stats.tips} tips in ${(ms / 1000).toFixed(2)}s (${precision} precision)`, 'success');
     $('tree-results').scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (e) {
     if (e.message === 'cancelled') {

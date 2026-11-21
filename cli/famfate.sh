@@ -45,8 +45,9 @@ Align / trim / tree:
   -m, --model jtt|lg|wag|nt|gtr   FastTree model (nt/gtr for nucleotides)      [lg]
       --no-gamma           omit -gamma (on by default)
       --fasttree browser|double  FastTree build: 'browser' = single precision, byte-identical
-                           to the website (FastTree-browser); 'double' = bioconda's
-                           double-precision FastTree/FastTreeMP (multithreaded)  [browser]
+                           to the website's default (FastTree-browser); 'double' = bioconda's
+                           double-precision FastTree/FastTreeMP (multithreaded), matching the
+                           website's "Double" precision option              [browser]
       --fasttree-args "…"  extra FastTree arguments
 
 Post-processing:
