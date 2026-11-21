@@ -26,5 +26,10 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: .
+      # GitHub's artifact API is eventually consistent; deploy-pages@v4 can
+      # otherwise report "Found 0 artifact(s)" immediately after a successful
+      # upload (see actions/deploy-pages issue #368).
+      - name: Wait for artifact metadata to propagate
+        run: sleep 10
       - id: deployment
         uses: actions/deploy-pages@v4
