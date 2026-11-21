@@ -32,6 +32,7 @@ famfate.sh --version || true
 section "1. family → kalign → trim → FastTree (offline)"
 famfate.sh --family "$EX/proteins.fa" --no-annotate -o t1 -T 2 >/dev/null 2>t1.err || { cat t1.err; bad "pipeline ran"; }
 check "aligned FASTA written"   test -s t1/family.aln.fa
+check "Kalign 3.3.1 (portable build) used" grep -q '"tool":"kalign","version":"3.3.1"' t1/run.json
 check "browser FastTree used"   grep -q '"tool":"FastTree-browser"' t1/run.json
 check "tree has 16 tips"        test "$(tips t1/family.nwk)" -eq 16
 check "rooted tree + SVG"       test -s t1/family.rooted.nwk -a -s t1/family.svg

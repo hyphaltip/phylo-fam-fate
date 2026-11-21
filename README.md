@@ -57,7 +57,7 @@ Tool versions used in the browser and pinned in the CLI container:
 |---|---|---|---|
 | Search | BLAST+ `blastp` / `blastn`, `makeblastdb`, `blastdbcmd` | 2.17.0 | 2.17.0 |
 | Search | HMMER `phmmer` | 3.4 | 3.4 |
-| Align | Kalign | 3.3.1 | 3.3.2 (3.3.1 isn't on bioconda) |
+| Align | Kalign | 3.3.1 | 3.3.1, built from source without AVX autodetection (`cli/build-kalign-portable.sh`): bioconda's binary can crash with SIGILL on CPUs lacking the build host's SIMD set |
 | Align | MUSCLE | 5.1.0 | 5.1.0 |
 | Align | MAFFT (E-INS-i) | 7.520 | 7.520 |
 | ML tree (CLI) | IQ-TREE / RAxML-NG | — (hand-off script) | 3.1.4 / 2.0.4 |

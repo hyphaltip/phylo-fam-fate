@@ -4,12 +4,16 @@
 # the website; the default) and bioconda's FastTree/FastTreeMP (double precision).
 #   docker run --rm -u $(id -u):$(id -g) -v "$PWD":/data ghcr.io/hyphaltip/phylo-fam-fate-cli famfate.sh -q P46151
 #   apptainer exec docker://ghcr.io/hyphaltip/phylo-fam-fate-cli famfate.sh -q P46151
-# FastTree as the browser runs it: single precision, strict FP (see cli/build-fasttree-browser.sh)
-FROM debian:bookworm-slim AS fasttree
-RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev curl ca-certificates \
+# Tools compiled from source for portability / browser parity:
+#  - FastTree-browser: single precision, strict FP, as the website (cli/build-fasttree-browser.sh)
+#  - Kalign 3.3.1 without AVX autodetection (cli/build-kalign-portable.sh): bioconda's
+#    kalign3 binary can die with SIGILL on CPUs lacking the build host's SIMD set.
+FROM debian:bookworm-slim AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      gcc libc6-dev make autoconf automake libtool curl ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-COPY cli/build-fasttree-browser.sh /tmp/
-RUN bash /tmp/build-fasttree-browser.sh /out
+COPY cli/build-fasttree-browser.sh cli/build-kalign-portable.sh /tmp/
+RUN bash /tmp/build-fasttree-browser.sh /out && bash /tmp/build-kalign-portable.sh /out
 
 FROM mambaorg/micromamba:1.5.10
 
@@ -29,7 +33,9 @@ COPY js/                 /opt/phylo-fam-fate/js/
 COPY assets/fasttree/    /opt/phylo-fam-fate/assets/fasttree/
 COPY assets/examples/    /opt/phylo-fam-fate/assets/examples/
 COPY cli/                /opt/phylo-fam-fate/cli/
-COPY --from=fasttree /out/bin/FastTree-browser /usr/local/bin/FastTree-browser
+COPY --from=build /out/bin/FastTree-browser /usr/local/bin/FastTree-browser
+# Replace conda's kalign (3.3.2, host-tuned SIMD) with the portable 3.3.1 build
+COPY --from=build /out/bin/kalign /opt/conda/bin/kalign
 USER root
 RUN chmod -R a+rX /opt/phylo-fam-fate \
  && chmod a+x /opt/phylo-fam-fate/cli/famfate.sh /opt/phylo-fam-fate/cli/famfate-js.mjs \

@@ -50,7 +50,9 @@ and its command-line twin, `famfate.sh`, share code and default settings.
 - `famfate-js` runs the site's own JavaScript for trimming, rooting (incl.
   MAD), annotation, SVG and iTOL export.
 - Container `ghcr.io/hyphaltip/phylo-fam-fate-cli:0.1.0` (linux/amd64), with
-  tools pinned to the browser's versions. It works with Docker and with
+  tools pinned to the browser's versions. Kalign 3.3.1 is built from source
+  without CPU-specific AVX code, because bioconda's kalign3 binary crashed
+  with "illegal instruction" on some CPUs. It works with Docker and with
   Apptainer/Singularity (`apptainer pull docker://…`).
 - CI runs the following in the container on every change:
   - the offline pipelines;
@@ -62,8 +64,6 @@ and its command-line twin, `famfate.sh`, share code and default settings.
 ### Known limitations
 - The container is x86-64 only, because BLAST+ 2.17.0 has no linux-arm64
   build on bioconda.
-- Kalign is 3.3.1 in the browser but 3.3.2 in the CLI (3.3.1 isn't on
-  bioconda).
 - MAFFT in the browser runs MAFFT's internal programs directly. The CLI's
   `mafft --genafpair --ep 0 --maxiterate 16` is equivalent, not
   byte-identical.
