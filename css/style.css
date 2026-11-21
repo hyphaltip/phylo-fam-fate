@@ -85,6 +85,24 @@ pre.preview { max-height: 16rem; overflow: auto; white-space: pre; margin: 0.75r
 footer { padding: 2rem 1rem; color: var(--muted); font-size: 0.85rem; text-align: center; }
 footer a { color: var(--primary); }
 
+/* Hit selection table */
+.hit-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-top: 0.5rem; }
+.hit-table th, .hit-table td { padding: 0.35rem 0.5rem; text-align: left; border-bottom: 1px solid var(--border); }
+.hit-table th { background: #f8fafc; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted); position: sticky; top: 0; }
+.hit-table td { font-family: var(--mono); }
+.hit-table td:first-child { text-align: center; }
+.hit-table tbody tr:hover { background: #f1f5f9; }
+.hit-table tbody tr.filtered-out { opacity: 0.35; }
+#hit-results { max-height: 22rem; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+.hit-footer { padding: 0.5rem; align-items: center; }
+
+/* Runtime timing strip */
+.timing-strip { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; padding: 0.5rem 0.75rem; margin-bottom: 1rem;
+  background: #f1f5f9; border: 1px solid var(--border); border-radius: 6px; font-size: 0.78rem; color: var(--muted); }
+.timing-strip:empty { display: none; }
+.timing-strip .timing-item { font-family: var(--mono); }
+.timing-strip .timing-item strong { color: var(--fg); }
+
 .hidden { display: none !important; }
 
 @media (max-width: 640px) {

@@ -11,14 +11,20 @@ const $ = (id) => document.getElementById(id);
 // Pipeline state
 const state = {
   rawFasta: '',       // original input sequences
-  dbFasta: '',        // search database (decompressed FASTA)
+  dbFasta: '',        // search database held in memory (custom / phmmer)
+  dbUrl: '',          // streamed DB URL (BLAST presets)
   dbSource: '',       // human-readable DB source
-  searchFasta: '',    // sequences from search hits
+  dbPreset: 'uniprot-sprot',
+  proteomes: [],      // reference proteome catalogue
+  searchHits: [],     // structured hit records
+  selectedHits: new Set(),
+  searchFasta: '',    // sequences from selected hits
   alignedFasta: '',   // aligned sequences
   trimmedFasta: '',   // trimmed alignment
   newick: '',
   records: [],
   metadata: [],
+  timings: [],        // {step, ms} for the runtime strip
 };
 
 const VERSION = '0.1.0';
@@ -43,6 +49,12 @@ function recordMeta(step, tool, version, params, inputDesc, outputDesc, ms) {
     time: ms !== null ? `${(ms / 1000).toFixed(2)}s` : '—',
     timestamp: new Date().toISOString(),
   });
+  if (ms != null) {
+    state.timings.push({ step, ms });
+    console.log(`[phylo-fam-fate] ${step} (${tool}): ${(ms / 1000).toFixed(2)}s | ${inputDesc} → ${outputDesc}`);
+    $('timing-strip').innerHTML = state.timings.map(t =>
+      `<span class="timing-item"><strong>${escapeHtml(t.step)}</strong> ${(t.ms / 1000).toFixed(2)}s</span>`).join('');
+  }
   renderMetadata();
 }
 function renderMetadata() {
@@ -186,6 +198,11 @@ $('api-fetch').addEventListener('click', async () => {
 // ---------------------------------------------------------------------------
 // STEP 2: Search (optional)
 // ---------------------------------------------------------------------------
+const UNIPROT_FTP = 'https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase';
+const SPROT_URL = `${UNIPROT_FTP}/complete/uniprot_sprot.fasta.gz`;
+const PROTEOME_README = `${UNIPROT_FTP}/reference_proteomes/README`;
+const PDB_URL = 'https://files.wwpdb.org/pub/pdb/derived_data/pdb_seqres.txt.gz';
+
 /** Decode a FASTA buffer, transparently decompressing gzip (magic bytes 1f 8b). */
 async function decodeFastaBuffer(buf, label) {
   const bytes = new Uint8Array(buf);
@@ -205,9 +222,32 @@ async function decodeFastaBuffer(buf, label) {
   return { text, records, gzipped, bytes: bytes.length };
 }
 
-/** Accept a decoded FASTA database and update the UI. */
+/** Fetch + decode a remote FASTA (needed for phmmer, which cannot stream a DB). */
+async function fetchDb(url, label) {
+  const t0 = performance.now();
+  status(`Downloading ${label}…`);
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} from ${new URL(url).host}`);
+  const decoded = await decodeFastaBuffer(await resp.arrayBuffer(), label);
+  const ms = performance.now() - t0;
+  console.log(`[phylo-fam-fate] DB download+decode (${label}): ${(ms / 1000).toFixed(2)}s`);
+  return decoded;
+}
+
+/** Describe a URL-backed DB in the UI. */
+function setDbUrl(url, label, note = '') {
+  state.dbUrl = url;
+  state.dbFasta = '';
+  state.dbSource = label;
+  $('search-db-info').innerHTML =
+    `<strong>${escapeHtml(label)}</strong>${note ? ' · ' + note : ''} · streamed into Biowasm at search time (nothing uploaded)`;
+  stepStatus('search', 'db ready', 'done');
+}
+
+/** Describe an in-memory DB in the UI. */
 function setSearchDb({ text, records, gzipped, bytes }, source) {
   state.dbFasta = text;
+  state.dbUrl = '';
   state.dbSource = source;
   const size = gzipped ? `${bytes.toLocaleString()} B gzipped → ${text.length.toLocaleString()} B` : `${text.length.toLocaleString()} B`;
   $('search-db-info').innerHTML = `<strong>${escapeHtml(source)}</strong> · ${records.length.toLocaleString()} sequences · ${size} · ready to search`;
@@ -215,35 +255,100 @@ function setSearchDb({ text, records, gzipped, bytes }, source) {
   status(`Database loaded: ${records.length.toLocaleString()} sequences (${size})`, 'success');
 }
 
-// Database file input (also handles .gz)
+// --- Database preset selection ------------------------------------------------
+function applyDbPreset() {
+  const preset = $('search-db-preset').value;
+  state.dbPreset = preset;
+  $('search-db-custom').classList.toggle('hidden', preset !== 'custom');
+  $('proteome-picker').classList.toggle('hidden', preset !== 'uniprot-reference');
+  $('pdb-options').classList.toggle('hidden', preset !== 'pdb');
+
+  if (preset === 'uniprot-sprot') {
+    setDbUrl(SPROT_URL, 'UniProt Swiss-Prot',
+      `${UNIPROT_FTP.split('/')[2]}, 94 MB gzipped, ~565k reviewed proteins`);
+  } else if (preset === 'uniprot-reference') {
+    state.dbUrl = ''; state.dbFasta = '';
+    $('search-db-info').textContent = 'Choose a reference proteome below, then click “Load proteome”.';
+    stepStatus('search', 'choose proteome');
+    loadProteomeCatalog();
+  } else if (preset === 'pdb') {
+    const proxy = $('search-proxy').value.trim();
+    const url = proxy ? proxy + encodeURIComponent(PDB_URL) : PDB_URL;
+    setDbUrl(url, 'PDB SEQRES',
+      proxy ? 'via CORS proxy' : 'direct URL (CORS-blocked — see note)');
+  } else {
+    state.dbUrl = ''; state.dbFasta = '';
+    $('search-db-info').textContent = 'Provide a FASTA database as a local file or a CORS-enabled URL.';
+    stepStatus('search', 'choose db');
+  }
+}
+$('search-db-preset').addEventListener('change', applyDbPreset);
+$('search-proxy').addEventListener('input', () => { if (state.dbPreset === 'pdb') applyDbPreset(); });
+
+// --- Reference proteome catalogue ---------------------------------------------
+async function loadProteomeCatalog() {
+  if (state.proteomes.length) { renderProteomeOptions(); return; }
+  $('proteome-count').textContent = 'Loading catalogue…';
+  try {
+    const t = await (await fetch(PROTEOME_README)).text();
+    state.proteomes = t.split('\n')
+      .filter(l => /^UP0/.test(l))
+      .map(l => {
+        const f = l.split('\t');
+        return { id: f[0], taxid: f[1], division: f[3], count: parseInt(f[4], 10) || 0, name: f[7] || '' };
+      })
+      .filter(p => p.name);
+    renderProteomeOptions();
+  } catch (e) {
+    $('proteome-count').textContent = `Could not load catalogue: ${e.message}`;
+  }
+}
+
+function renderProteomeOptions() {
+  const q = $('proteome-filter').value.trim().toLowerCase();
+  const matched = state.proteomes.filter(p =>
+    !q || p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q) || p.taxid.includes(q));
+  const shown = matched.slice(0, 300);
+  $('proteome-select').innerHTML = shown.map(p =>
+    `<option value="${p.id}">${escapeHtml(p.name)} · ${p.id} · ${p.count.toLocaleString()} proteins</option>`).join('');
+  $('proteome-count').textContent = `${matched.length.toLocaleString()} proteomes` +
+    (matched.length > 300 ? ' (showing first 300 — refine filter)' : '');
+}
+$('proteome-filter').addEventListener('input', renderProteomeOptions);
+
+$('proteome-load').addEventListener('click', () => {
+  const id = $('proteome-select').value;
+  const p = state.proteomes.find(x => x.id === id);
+  if (!p) { status('Select a reference proteome first', 'error'); return; }
+  const division = p.division.charAt(0).toUpperCase() + p.division.slice(1);
+  const url = `${UNIPROT_FTP}/reference_proteomes/${division}/${p.id}/${p.id}_${p.taxid}.fasta.gz`;
+  setDbUrl(url, `${p.name} (${p.id})`, `${p.count.toLocaleString()} proteins`);
+  status(`Selected ${p.name} — ready to search`, 'success');
+});
+
+// --- Custom DB file / URL ------------------------------------------------------
 $('search-db').addEventListener('change', async () => {
   const file = $('search-db').files[0];
   if (!file) return;
   try {
     status(`Reading database ${file.name}…`);
-    const decoded = await decodeFastaBuffer(await file.arrayBuffer(), file.name);
-    setSearchDb(decoded, file.name);
+    setSearchDb(await decodeFastaBuffer(await file.arrayBuffer(), file.name), file.name);
   } catch (e) {
     status(`Database error: ${e.message}`, 'error');
     stepStatus('search', 'db error');
   }
 });
 
-// Database URL input (CORS required; .gz detected by magic bytes)
 $('search-db-url-load').addEventListener('click', async () => {
   const url = $('search-db-url').value.trim();
   if (!url) { status('Enter a database URL first', 'error'); return; }
   $('search-db-url-load').disabled = true;
-  status(`Fetching database from URL…`);
   try {
-    const resp = await fetch(url);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status} from ${new URL(url).host}`);
-    const decoded = await decodeFastaBuffer(await resp.arrayBuffer(), 'URL');
-    setSearchDb(decoded, new URL(url).host + '/' + url.split('/').pop());
+    setSearchDb(await fetchDb(url, 'URL'), new URL(url).host + '/' + url.split('/').pop());
+    status('Database URL loaded — ready to search', 'success');
   } catch (e) {
     const hint = e.message.toLowerCase().includes('failed to fetch')
-      ? ' (the server likely lacks CORS headers)'
-      : '';
+      ? ' (the server likely lacks CORS headers)' : '';
     status(`URL database error: ${e.message}${hint}`, 'error');
     stepStatus('search', 'db error');
   } finally {
@@ -253,17 +358,95 @@ $('search-db-url-load').addEventListener('click', async () => {
 
 $('search-enable').addEventListener('change', () => {
   $('search-options').classList.toggle('hidden', !$('search-enable').checked);
-  if ($('search-enable').checked && !state.dbFasta) {
-    status('Load a database file or URL for the local search', 'info');
+  if ($('search-enable').checked && !state.dbUrl && !state.dbFasta) {
+    status('Choose a database source for the local search', 'info');
   }
 });
 
+// --- Live hit filtering + selection --------------------------------------------
+// Hit keys are stable numeric ids assigned after sorting; using an index (rather
+// than a query\0name string) avoids embedding control characters in HTML attrs.
+const hitKey = h => String(h.id);
+
+function passesCutoffs(h) {
+  const maxE = parseFloat($('hit-evalue').value);
+  const minScore = parseFloat($('hit-score').value) || 0;
+  const minPid = parseFloat($('hit-pident').value) || 0;
+  const minLen = parseInt($('hit-length').value, 10) || 0;
+  return (!isNaN(maxE) && h.evalue <= maxE)
+    && h.score >= minScore
+    && (h.pident == null || h.pident >= minPid)
+    && (h.length == null || h.length >= minLen);
+}
+
+function fmtE(v) { return v < 0.001 ? v.toExponential(1) : v.toFixed(4); }
+
+function renderHits() {
+  const maxHits = parseInt($('search-maxhits').value, 10) || 50;
+  const eligible = state.searchHits.filter(passesCutoffs);
+  const shown = eligible.slice(0, maxHits);
+  const html = shown.map(h => {
+    const key = hitKey(h);
+    const checked = state.selectedHits.has(key) ? 'checked' : '';
+    return `<tr class="${passesCutoffs(h) ? '' : 'filtered-out'}">
+      <td><input type="checkbox" class="hit-check" data-key="${escapeAttr(key)}" ${checked}></td>
+      <td title="${escapeAttr(h.name)}">${escapeHtml(trunc(h.name, 28))}</td>
+      <td>${escapeHtml(h.query)}</td>
+      <td>${fmtE(h.evalue)}</td>
+      <td>${h.score.toFixed(1)}</td>
+      <td>${h.pident == null ? '—' : h.pident.toFixed(1)}</td>
+      <td>${h.length == null ? '—' : h.length}</td>
+    </tr>`;
+  }).join('');
+  $('hit-table-body').innerHTML = html || '<tr><td colspan="7" class="hint">No hits pass the current cutoffs</td></tr>';
+  document.querySelectorAll('.hit-check').forEach(cb => {
+    cb.addEventListener('change', () => {
+      if (cb.checked) state.selectedHits.add(cb.dataset.key);
+      else state.selectedHits.delete(cb.dataset.key);
+      updateHitSummary();
+    });
+  });
+  $('hit-controls').classList.remove('hidden');
+  $('hit-results').classList.remove('hidden');
+  updateHitSummary();
+}
+
+function updateHitSummary() {
+  const chosen = state.searchHits.filter(h => state.selectedHits.has(hitKey(h)) && passesCutoffs(h)).length;
+  $('hit-summary').textContent = `${chosen} selected · ${state.searchHits.length} total hits`;
+  $('hit-use-selected').textContent = `Use ${chosen} selected for alignment →`;
+  $('hit-use-selected').disabled = chosen === 0;
+}
+
+['hit-evalue', 'hit-score', 'hit-pident', 'hit-length'].forEach(id => {
+  $(id).addEventListener('input', renderHits);
+});
+$('hit-select-all').addEventListener('click', () => {
+  state.searchHits.filter(passesCutoffs).forEach(h => state.selectedHits.add(hitKey(h)));
+  renderHits();
+});
+$('hit-select-none').addEventListener('click', () => {
+  state.selectedHits.clear(); renderHits();
+});
+
+$('hit-use-selected').addEventListener('click', () => {
+  const chosen = state.searchHits.filter(h => state.selectedHits.has(hitKey(h)) && passesCutoffs(h) && h.seq);
+  if (!chosen.length) { status('No usable sequences in the selection', 'error'); return; }
+  state.searchFasta = toFasta(chosen.map(h => ({ name: h.name, seq: h.seq })));
+  $('align-input').value = 'search';
+  $('align-input').querySelector('option[value="search"]').textContent = `Search hits (${chosen.length})`;
+  stepStatus('search', `${chosen.length} selected`, 'done');
+  status(`${chosen.length} sequences ready for alignment`, 'success');
+  recordMeta('Select hits', 'browser', VERSION, 'cutoffs + manual selection',
+    `${state.searchHits.length} hits`, `${chosen.length} sequences`, null);
+});
+
+// --- Run the search ------------------------------------------------------------
 $('search-run').addEventListener('click', async () => {
   const tool = $('search-tool').value;
   if (!state.rawFasta) { status('Load input sequences first', 'error'); return; }
-  if (!state.dbFasta) { status('Load a database file or URL first', 'error'); return; }
+  if (!state.dbUrl && !state.dbFasta) { status('Choose a database source first', 'error'); return; }
 
-  const dbFasta = state.dbFasta;
   const maxHits = parseInt($('search-maxhits').value, 10) || 50;
   stepStatus('search', 'running…', 'running');
   status(`Running ${tool} locally…`);
@@ -272,32 +455,38 @@ $('search-run').addEventListener('click', async () => {
   try {
     let hits;
     if (tool === 'phmmer') {
-      const out = await runPhmmer(state.rawFasta, dbFasta, maxHits);
+      // phmmer needs the DB as a readable file; fetch/decode it if URL-backed.
+      let dbFasta = state.dbFasta;
+      if (!dbFasta && state.dbUrl) {
+        const decoded = await fetchDb(state.dbUrl, state.dbSource);
+        dbFasta = decoded.text;
+        state.dbFasta = dbFasta; // cache for subsequent phmmer runs
+      }
+      const out = await runPhmmer(state.rawFasta, dbFasta);
       hits = parsePhmmerHits(out);
+      // phmmer does not report sequences; recover them from the in-memory DB.
+      const byName = new Map(parseFasta(dbFasta).map(r => [r.name, r.seq]));
+      hits.forEach(h => { h.seq = byName.get(h.name) || ''; });
       $('search-preview').textContent = out.slice(0, 3000);
     } else {
-      const out = await runBlast(tool, state.rawFasta, dbFasta, maxHits);
+      // BLAST embeds full subject sequences (sseq) in its tabular output.
+      const out = await runBlast(tool, state.rawFasta, state.dbFasta, maxHits, state.dbUrl);
       hits = parseBlastHits(out);
       $('search-preview').textContent = out.slice(0, 3000);
     }
     $('search-preview').classList.remove('hidden');
 
-    // Extract hit sequences from the database FASTA
-    const dbRecords = parseFasta(dbFasta);
-    const hitRecords = dbRecords.filter(r => hits.includes(r.name) || hits.some(h => h.startsWith(r.name)));
-    if (!hitRecords.length) {
-      status(`Search ran but no database sequences could be matched`, 'error');
-      stepStatus('search', 'no hits');
-      return;
-    }
-    state.searchFasta = toFasta(hitRecords);
-    $('align-input').value = 'search';
-    $('align-input').querySelector('option[value="search"]').textContent = `Search hits (${hitRecords.length})`;
-    stepStatus('search', `${hitRecords.length} hits`, 'done');
-    recordMeta('Search', tool, 'biowasm', `maxHits=${maxHits}`,
-      `${state.records.length} queries + ${dbRecords.length} db (${state.dbSource})`, `${hitRecords.length} hits`,
-      performance.now() - t0);
-    status(`Found ${hitRecords.length} hits — align them in step 3`, 'success');
+    hits.sort((a, b) => a.evalue - b.evalue);
+    hits.forEach((h, i) => { h.id = i; });
+    state.searchHits = hits;
+    state.selectedHits = new Set(hits.filter(passesCutoffs).slice(0, maxHits).map(hitKey));
+    renderHits();
+    stepStatus('search', `${hits.length} hits`, 'done');
+    const ms = performance.now() - t0;
+    recordMeta('Search', tool, 'biowasm',
+      `maxHits=${maxHits}; evalue≤${$('hit-evalue').value}, score≥${$('hit-score').value}, pid≥${$('hit-pident').value}, len≥${$('hit-length').value}`,
+      `${state.records.length} queries + ${state.dbSource}`, `${hits.length} hits`, ms);
+    status(`Found ${hits.length} hits — filter and select which to align`, 'success');
   } catch (e) {
     status(`Search failed: ${e.message}`, 'error');
     stepStatus('search', 'error');
@@ -305,6 +494,9 @@ $('search-run').addEventListener('click', async () => {
     $('search-run').disabled = false;
   }
 });
+
+// Initialize preset UI on load
+applyDbPreset();
 
 // ---------------------------------------------------------------------------
 // STEP 3: Align
@@ -361,8 +553,10 @@ $('trim-run').addEventListener('click', () => {
     minConservation: parseFloat($('trim-cons').value),
     trimEnds: $('trim-ends').checked,
   };
+  const t0 = performance.now();
   try {
     const { fasta, stats } = trimAlignment(state.alignedFasta, opts);
+    const trimMs = performance.now() - t0;
     state.trimmedFasta = fasta;
     $('trim-stats').innerHTML = `
       <div class="stat"><span class="stat-label">Columns before</span><span class="stat-value">${stats.before}</span></div>
@@ -375,7 +569,7 @@ $('trim-run').addEventListener('click', () => {
     stepStatus('trim', `${stats.after} cols`, 'done');
     recordMeta('Trim', 'trimAl-like (JS)', VERSION,
       `gap≤${opts.gapThreshold}, cons≥${opts.minConservation}, ends=${opts.trimEnds}`,
-      `${stats.before} cols`, `${stats.after} cols`, null);
+      `${stats.before} cols`, `${stats.after} cols`, trimMs);
     status(`Trimmed to ${stats.after} columns (removed ${stats.removed})`, 'success');
   } catch (e) {
     status(`Trim failed: ${e.message}`, 'error');

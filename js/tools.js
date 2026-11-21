@@ -63,62 +63,129 @@ export async function runAligner(tool, fasta) {
 }
 
 /** Run local BLAST against a user-provided FASTA database. */
-export async function runBlast(program, queryFasta, dbFasta, maxHits) {
+export async function runBlast(program, queryFasta, dbFasta, maxHits, dbUrl) {
   // Biowasm exposes each BLAST binary as a separate program (there is no
   // monolithic `blast.js`), so request the chosen program plus makeblastdb.
   await initTools([`blast/${program}/2.17.0`, 'blast/makeblastdb/2.17.0']);
+  // Mounting a URL streams it into the WASM filesystem without loading the
+  // whole (possibly 100 MB) FASTA into JS memory. BLAST reads gzip directly.
+  const dbMount = dbUrl
+    ? { name: 'db.fa.gz', url: dbUrl }
+    : { name: 'db.fa', data: dbFasta };
   await cli.mount([
     { name: 'query.fa', data: queryFasta },
-    { name: 'db.fa', data: dbFasta },
+    dbMount,
   ]);
+  const dbFile = dbUrl ? 'db.fa.gz' : 'db.fa';
   // Build a local BLAST database from the mounted FASTA
   const isNucleotide = program === 'blastn';
   const dbType = isNucleotide ? 'nucl' : 'prot';
   // v5 databases use LMDB, which is unavailable in the WASM filesystem;
   // v4 uses traditional .pin/.psq index files and works in-browser.
-  await cli.exec(`makeblastdb -in db.fa -dbtype ${dbType} -out mydb -blastdb_version 4`);
+  await cli.exec(`makeblastdb -in ${dbFile} -dbtype ${dbType} -out mydb -blastdb_version 4`);
   // Use a small word size for short queries; disable low-complexity masking so
-  // tandem-repeat queries aren't filtered out entirely.
-  const filter = isNucleotide ? '-task blastn -dust no' : '-seg no';
-  const result = await cli.exec(
-    `${program} -query query.fa -db mydb ${filter} -max_target_seqs ${maxHits} -outfmt 6`
-  );
+  // tandem-repeat queries aren't filtered out entirely. Use a permissive
+  // E-value here — the UI applies live cutoffs client-side.
+  // Each flag must be a separate argv element (Aioli array form).
+  const filter = isNucleotide ? ['-task', 'blastn', '-dust', 'no'] : ['-seg', 'no'];
+  // Include sseq so hit sequences can be built without re-reading the DB.
+  // Array form is required because the outfmt string contains spaces.
+  const result = await cli.exec(program, [
+    '-query', 'query.fa', '-db', 'mydb', ...filter,
+    '-evalue', '1000', '-max_target_seqs', String(maxHits),
+    '-outfmt', '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore sseq',
+  ]);
   const text = execText(result);
   if (!text.trim()) throw new Error(`${program} produced no hits — try a different query/database`);
   return text;
 }
 
-/** Run local phmmer against a user-provided FASTA database. */
-export async function runPhmmer(queryFasta, dbFasta, maxHits) {
-  await initTools(['hmmer/3.4']);
+/** Run local phmmer against a user-provided FASTA database.
+ *  The WASM build is `phmmer-simd`; it supports -E/-T but not --maxhits/-M. */
+export async function runPhmmer(queryFasta, dbFasta) {
+  await initTools(['hmmer/phmmer/3.4']);
   await cli.mount([
     { name: 'query.fa', data: queryFasta },
     { name: 'db.fa', data: dbFasta },
   ]);
-  const result = await cli.exec(
-    `phmmer --maxhits ${maxHits} --domT 1e-3 query.fa db.fa`
-  );
+  // --noali keeps output compact; the score table and domain coordinates we
+  // parse are still present. Truncation happens client-side.
+  const result = await cli.exec(`phmmer -E 1000 --domE 1000 --noali query.fa db.fa`);
   const text = execText(result);
   if (!text.trim()) throw new Error('phmmer produced no hits — try a different query/database');
   return text;
 }
 
-/** Parse BLAST tabular output -> array of subject IDs. */
+/** Parse BLAST outfmt 6 -> array of structured hit records. */
 export function parseBlastHits(tabular) {
-  const ids = [];
+  const hits = [];
   for (const line of tabular.split('\n')) {
     if (!line.trim() || line.startsWith('#')) continue;
-    const fields = line.split('\t');
-    if (fields.length > 1) ids.push(fields[1]);
+    const f = line.split('\t');
+    if (f.length < 12) continue;
+    hits.push({
+      name: f[1],
+      query: f[0],
+      pident: parseFloat(f[2]),
+      length: parseInt(f[3], 10),
+      evalue: parseFloat(f[10]),
+      score: parseFloat(f[11]),
+      seq: f[12] || '',   // sseq — full subject sequence from the DB
+    });
   }
-  return [...new Set(ids)];
+  return hits;
 }
 
-/** Parse phmmer output -> array of subject names (lines starting with '>>'). */
+/** Parse phmmer text output -> array of structured hit records.
+ *  Reads the "Scores for complete sequences" table and the per-domain
+ *  alignment coordinates (for alignment length). Identity is not reported by
+ *  phmmer's tabular/text summary, so pident is null for these hits. */
 export function parsePhmmerHits(output) {
-  const ids = [];
+  const hits = [];
+  let query = '';
+  let currentTarget = '';
+  const lengths = new Map(); // `${query}\0${name}` -> aligned length
+
   for (const line of output.split('\n')) {
-    if (line.startsWith('>>')) ids.push(line.slice(2).trim().split(/\s+/)[0]);
+    // Query header: "Query:       query  [L=151]"
+    let m = line.match(/^\s*Query:\s+(\S+)/);
+    if (m) { query = m[1]; continue; }
+
+    // Domain annotation rows, inside ">> target  description" blocks.
+    // e.g. "   1 !  329.1  0.6  2.4e-103  2.4e-103  1  151 []  1  151 []  1  151 [] 1.00"
+    if (/^\s*\d+\s+[!?.]\s/.test(line)) {
+      // HMMER writes domain-end markers as [] or [. — strip brackets and the
+      // stray '.' tokens so column indices stay stable.
+      const parts = line.replace(/[\[\]]/g, ' ').trim().split(/\s+/).filter(t => t !== '.');
+      // parts: #, mark, score, bias, c-E, i-E, hmmfrom, hmmto, alifrom, alito, ...
+      const from = parseInt(parts[8], 10);
+      const to = parseInt(parts[9], 10);
+      if (!isNaN(from) && !isNaN(to) && to >= from && currentTarget) {
+        const key = `${query}\u0000${currentTarget}`;
+        lengths.set(key, (lengths.get(key) || 0) + (to - from + 1));
+      }
+      continue;
+    }
+    m = line.match(/^>>\s+(\S+)/);
+    if (m) { currentTarget = m[1]; continue; }
+
+    // Full-sequence score table row (>= 9 fields):
+    // fullE fullScore bias domE domScore domBias exp N name [description...]
+    m = line.match(/^\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\d+)\s+(\S+)/);
+    if (!m) continue;
+    const evalue = parseFloat(m[1]);
+    const score = parseFloat(m[2]);
+    const name = m[9];
+    if (isNaN(evalue) || !name || name === 'Sequence' || !/^[A-Za-z0-9]/.test(name)) continue;
+    hits.push({ name, query: query || 'query', evalue, score, pident: null, length: null });
   }
-  return [...new Set(ids)];
+
+  // Deduplicate by (query, name), keeping the best E-value; attach lengths.
+  const best = new Map();
+  for (const h of hits) {
+    h.length = lengths.get(`${h.query}\u0000${h.name}`) || null;
+    const k = `${h.query}\u0000${h.name}`;
+    if (!best.has(k) || h.evalue < best.get(k).evalue) best.set(k, h);
+  }
+  return [...best.values()];
 }

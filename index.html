@@ -23,6 +23,7 @@
 
   <!-- Status bar -->
   <div id="global-status" class="status-bar"></div>
+  <div id="timing-strip" class="timing-strip"></div>
 
   <!-- STEP 1: Input -->
   <section class="step" id="step-input">
@@ -90,13 +91,74 @@
               <option value="phmmer">phmmer (protein, HMMER)</option>
             </select>
           </label>
-          <label>Database file <input type="file" id="search-db" accept=".fa,.fasta,.fas,.fna,.faa,.gz"></label>
-          <label>Database URL <input type="url" id="search-db-url" placeholder="https://…/db.fa.gz" style="width:22rem"></label>
-          <button class="btn small" id="search-db-url-load" type="button">Load URL</button>
+          <label>Database source
+            <select id="search-db-preset">
+              <option value="uniprot-sprot" selected>UniProt Swiss-Prot (reviewed, ~565k)</option>
+              <option value="uniprot-reference">UniProt reference proteome…</option>
+              <option value="pdb">PDB SEQRES (~160k chains)</option>
+              <option value="custom">Custom file / URL</option>
+            </select>
+          </label>
           <label>Max hits <input type="number" id="search-maxhits" value="50" min="1" max="500"></label>
           <button class="btn" id="search-run">Run search</button>
         </div>
-        <p class="hint" id="search-db-info">Provide a FASTA database as a local file or a URL. <strong>.gz files are decompressed automatically.</strong> URLs must allow CORS. Biowasm builds a local index in-browser.</p>
+
+        <!-- Reference proteome picker (populated on demand from UniProt README) -->
+        <div id="proteome-picker" class="hidden">
+          <div class="row">
+            <label>Filter proteomes <input type="text" id="proteome-filter" placeholder="e.g. Escherichia coli, human, yeast" style="width:24rem"></label>
+            <span class="hint" id="proteome-count">Loading catalogue…</span>
+          </div>
+          <div class="row">
+            <label>Reference proteome
+              <select id="proteome-select" style="width:36rem"></select>
+            </label>
+            <button class="btn small" id="proteome-load" type="button">Load proteome</button>
+          </div>
+        </div>
+
+        <!-- Custom DB file / URL -->
+        <div id="search-db-custom" class="hidden">
+          <div class="row">
+            <label>Database file <input type="file" id="search-db" accept=".fa,.fasta,.fas,.fna,.faa,.gz"></label>
+            <label>Database URL <input type="url" id="search-db-url" placeholder="https://…/db.fa.gz" style="width:22rem"></label>
+            <button class="btn small" id="search-db-url-load" type="button">Load URL</button>
+          </div>
+        </div>
+
+        <!-- PDB needs a CORS proxy (files.wwpdb.org sends no CORS headers) -->
+        <div id="pdb-options" class="hidden">
+          <p class="hint"><strong>Note:</strong> <code>files.wwpdb.org</code> does not send CORS headers, so direct browser fetch is blocked. Download
+            <a href="https://files.wwpdb.org/pub/pdb/derived_data/pdb_seqres.txt.gz" target="_blank" rel="noopener">pdb_seqres.txt.gz</a>
+            and use the <em>Custom file</em> option, or supply a CORS proxy prefix below (e.g. your own Cloudflare Worker).</p>
+          <div class="row">
+            <label>CORS proxy prefix <input type="text" id="search-proxy" placeholder="https://your-worker.example.com/?url=" style="width:28rem"></label>
+          </div>
+        </div>
+
+        <p class="hint" id="search-db-info">UniProt files are fetched directly from <code>ftp.uniprot.org</code> (CORS-enabled) and indexed locally by Biowasm. Nothing is uploaded.</p>
+
+        <!-- Live hit filtering + selection -->
+        <div id="hit-controls" class="hidden">
+          <div class="row">
+            <label>E-value ≤ <input type="text" id="hit-evalue" value="1e-5" style="width:6rem"></label>
+            <label>Score ≥ <input type="number" id="hit-score" value="0" style="width:6rem"></label>
+            <label>% identity ≥ <input type="number" id="hit-pident" value="0" min="0" max="100" style="width:5rem"></label>
+            <label>Align length ≥ <input type="number" id="hit-length" value="0" min="0" style="width:6rem"></label>
+            <button class="btn small" id="hit-select-all" type="button">Select all</button>
+            <button class="btn small" id="hit-select-none" type="button">Select none</button>
+          </div>
+        </div>
+        <div id="hit-results" class="hidden">
+          <table class="hit-table">
+            <thead><tr><th>Keep</th><th>Subject</th><th>Query</th><th>E-value</th><th>Score</th><th>%ID</th><th>Len</th></tr></thead>
+            <tbody id="hit-table-body"></tbody>
+          </table>
+          <div class="row hit-footer">
+            <span class="hint" id="hit-summary"></span>
+            <button class="btn primary small" id="hit-use-selected" type="button">Use selected for alignment →</button>
+          </div>
+        </div>
         <pre class="preview hidden" id="search-preview"></pre>
       </div>
     </div>

@@ -43,20 +43,45 @@ timing, and provenance.
 - GitHub Pages: 1 GB site/repo limit, 100 MB max individual file
 
 ### Search database sources
-The search database (FASTA) can be loaded three ways:
+Choose a **Database source** from the dropdown in step 2:
 
-1. **Local file** — pick a FASTA (`.fa`, `.fasta`, `.faa`, …) from your device.
-2. **URL** — paste an `https://…` URL and click **Load URL**. The server must
-   send CORS headers (`Access-Control-Allow-Origin`), otherwise the browser
-   blocks the fetch. Public FASTA mirrors and GitHub raw URLs work.
-3. **Compressed** — both local files and URLs may be **gzip** (`.gz`). Gzip is
-   detected by magic bytes (`1f 8b`), not the filename, so content-encoding and
-   content-type don't matter. Decompression uses the browser's native
-   `DecompressionStream('gzip')`. Plain-text FASTA works unchanged.
+1. **UniProt Swiss-Prot** (default) — the reviewed UniProtKB FASTA
+   (~94 MB gzipped, ~565k proteins) is streamed directly from
+   `ftp.uniprot.org`. Biowasm builds a local BLAST index in the browser; the
+   file is never fully loaded into JS memory.
+2. **UniProt reference proteome** — loads the
+   [`reference_proteomes/README`](https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/reference_proteomes/README)
+   catalogue (~37,600 proteomes) and shows a searchable dropdown. Filter by
+   species name, proteome ID (`UP…`), or taxon ID, then click **Load proteome**.
+   The selected proteome's `<ID>_<TAXID>.fasta.gz` is streamed for BLAST.
+3. **PDB SEQRES** — `pdb_seqres.txt.gz` from `files.wwpdb.org`. That server does
+   **not** send CORS headers, so the browser cannot fetch it directly. Either
+   download the file and use *Custom file*, or provide a CORS-proxy prefix
+   (e.g. your own Cloudflare Worker).
+4. **Custom file / URL** — pick a FASTA (`.fa`, `.fasta`, `.faa`, …) from your
+   device, or paste an `https://…` URL and click **Load URL**. The server must
+   send CORS headers (`Access-Control-Allow-Origin`). Compressed inputs work
+   too: gzip is detected by magic bytes (`1f 8b`), not filename, and decompressed
+   with the browser's native `DecompressionStream('gzip')`.
 
-The decompressed database is held in browser memory only; nothing is uploaded.
-The DB source, sequence count, and compressed/decompressed sizes are recorded
-in the metadata table.
+phmmer cannot stream a URL-backed DB, so a URL/custom DB is downloaded and
+decompressed into browser memory on first phmmer run and then cached for later
+runs. Nothing is ever uploaded to a server. The DB source, sequence count, and
+sizes are recorded in the metadata table.
+
+### Hit cutoffs and selection
+After a search, every hit is shown in a table with **E-value**, **score**,
+**% identity** (BLAST only — phmmer does not report identity), and **alignment
+length**. Live cutoffs (`E-value ≤`, `Score ≥`, `% identity ≥`, `Align length ≥`)
+filter the table as you type. Use **Select all** / **Select none** or individual
+checkboxes, then **Use selected for alignment** to pass only those sequences to
+step 3. BLAST subject sequences are taken from the `sseq` column of the tabular
+output, and phmmer hits are recovered from the in-memory DB by subject ID.
+
+### Runtime timing
+Each step's elapsed time is printed to the browser console
+(`[phylo-fam-fate] …`) and shown in the **timing strip** above the pipeline.
+The same numbers appear in the run metadata table and in the exported JSON.
 
 ### Remote APIs (CORS-enabled, callable directly from the browser)
 | API | Use | Rate limit |
