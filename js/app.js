@@ -52,6 +52,7 @@ function recordMeta(step, tool, version, params, inputDesc, outputDesc, ms) {
   if (ms != null) {
     state.timings.push({ step, ms });
     console.log(`[phylo-fam-fate] ${step} (${tool}): ${(ms / 1000).toFixed(2)}s | ${inputDesc} → ${outputDesc}`);
+    debugLog(`${step} (${tool}): ${(ms / 1000).toFixed(2)}s | ${inputDesc} → ${outputDesc}`);
     $('timing-strip').innerHTML = state.timings.map(t =>
       `<span class="timing-item"><strong>${escapeHtml(t.step)}</strong> ${(t.ms / 1000).toFixed(2)}s</span>`).join('');
   }
@@ -70,6 +71,71 @@ function renderMetadata() {
 function escapeHtml(s) { return String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
 function escapeAttr(s) { return escapeHtml(s).replace(/"/g, '&quot;'); }
 function trunc(s, n) { return String(s).length > n ? String(s).slice(0, n) + '…' : String(s); }
+
+// ---------------------------------------------------------------------------
+// Debug log — errors at the bottom of the pipeline are otherwise only shown in
+// the status bar at the top of the page, so they look like "nothing happened".
+// ---------------------------------------------------------------------------
+const DEBUG_LIMIT = 200;
+function debugLog(msg, kind = '') {
+  const el = $('debug-log');
+  if (!el) return;
+  const ts = new Date().toISOString().slice(11, 23);
+  const lines = el.textContent ? el.textContent.split('\n') : [];
+  lines.push(`${ts}${kind ? ` [${kind}]` : ''} ${msg}`);
+  while (lines.length > DEBUG_LIMIT) lines.shift();
+  el.textContent = lines.join('\n');
+  el.scrollTop = el.scrollHeight;
+}
+function revealDebug() {
+  $('debug-panel')?.classList.remove('collapsed');
+  $('debug-toggle').textContent = 'Hide';
+}
+function showStepError(step, err) {
+  const body = $(`step-${step}`)?.querySelector('.step-body');
+  if (body) {
+    let box = $(`error-${step}`);
+    if (!box) {
+      box = document.createElement('div');
+      box.id = `error-${step}`;
+      box.className = 'error-box';
+      body.appendChild(box);
+    }
+    box.textContent = err?.stack || String(err);
+    box.classList.remove('hidden');
+  }
+  debugLog(`${step} ERROR: ${err?.stack || err}`, 'ERROR');
+  revealDebug();
+}
+function clearStepError(step) { $(`error-${step}`)?.classList.add('hidden'); }
+
+// Capture anything the browser or CDN tools report, even if it never reaches
+// a step handler. debugLog does not call console, so this cannot recurse.
+window.addEventListener('error', e =>
+  debugLog(`${e.message} (${e.filename}:${e.lineno})`, 'PAGE ERROR'));
+window.addEventListener('unhandledrejection', e =>
+  debugLog(`Unhandled rejection: ${e.reason?.stack || e.reason}`, 'PAGE ERROR'));
+for (const level of ['warn', 'error']) {
+  const orig = console[level].bind(console);
+  console[level] = (...args) => {
+    debugLog(args.map(a => a?.stack || String(a)).join(' '), level.toUpperCase());
+    orig(...args);
+  };
+}
+$('debug-toggle').addEventListener('click', () => {
+  const collapsed = $('debug-panel').classList.toggle('collapsed');
+  $('debug-toggle').textContent = collapsed ? 'Show' : 'Hide';
+});
+$('debug-clear').addEventListener('click', () => { $('debug-log').textContent = ''; });
+$('debug-copy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText($('debug-log').textContent);
+    status('Debug log copied to clipboard', 'success');
+  } catch (e) {
+    debugLog(`Clipboard failed: ${e}`, 'WARN');
+  }
+});
+debugLog(`phylo-fam-fate v${VERSION} starting`);
 
 function seqType(fasta) {
   const residues = fasta.split(/\r?\n/)
@@ -93,6 +159,8 @@ try {
   stepStatus('tree', 'ready');
 } catch (e) {
   status(`Failed to load FastTree WASM: ${e}`, 'error');
+  showStepError('tree', e);
+  debugLog('FastTree WASM init failed — the Build tree button stays disabled', 'FATAL');
 }
 
 // ---------------------------------------------------------------------------
@@ -488,6 +556,7 @@ $('search-run').addEventListener('click', async () => {
       `${state.records.length} queries + ${state.dbSource}`, `${hits.length} hits`, ms);
     status(`Found ${hits.length} hits — filter and select which to align`, 'success');
   } catch (e) {
+    showStepError('search', `Search failed: ${e.stack || e.message || e}`);
     status(`Search failed: ${e.message}`, 'error');
     stepStatus('search', 'error');
   } finally {
@@ -528,6 +597,7 @@ $('align-run').addEventListener('click', async () => {
     stepStatus('trim', 'ready');
     stepStatus('tree', 'ready');
   } catch (e) {
+    showStepError('align', `Alignment failed: ${e.stack || e.message || e}`);
     status(`Alignment failed: ${e.message}`, 'error');
     stepStatus('align', 'error');
   } finally {
@@ -572,6 +642,7 @@ $('trim-run').addEventListener('click', () => {
       `${stats.before} cols`, `${stats.after} cols`, trimMs);
     status(`Trimmed to ${stats.after} columns (removed ${stats.removed})`, 'success');
   } catch (e) {
+    showStepError('trim', `Trim failed: ${e.stack || e.message || e}`);
     status(`Trim failed: ${e.message}`, 'error');
     stepStatus('trim', 'error');
   }
@@ -581,6 +652,7 @@ $('trim-run').addEventListener('click', () => {
 // STEP 5: Tree
 // ---------------------------------------------------------------------------
 $('tree-run').addEventListener('click', () => {
+  const source = state.trimmedFasta ? 'trimmed' : (state.alignedFasta ? 'aligned' : 'raw');
   const fasta = state.trimmedFasta || state.alignedFasta || state.rawFasta;
   if (!fasta) { status('Load or align sequences first', 'error'); return; }
 
@@ -594,6 +666,23 @@ $('tree-run').addEventListener('click', () => {
   if ($('tree-gamma').checked) args.push('-gamma');
   if ($('tree-nosupport').checked) args.push('-nosupport');
 
+  // FastTree requires an alignment. Give a clear, visible message instead of
+  // letting the crate's length validator fail silently at the top of the page.
+  const recs = parseFasta(fasta);
+  const lengths = [...new Set(recs.map(r => r.seq.length))];
+  if (lengths.length > 1) {
+    const hint = `Sequences have unequal lengths (${lengths.slice(0, 6).join(', ')}${lengths.length > 6 ? ', …' : ''}). ` +
+      'FastTree needs an alignment — run step 3 (Align) first, or load an already-aligned FASTA.';
+    showStepError('tree', hint);
+    status('Tree needs an alignment — align first', 'error');
+    stepStatus('tree', 'needs alignment');
+    return;
+  }
+
+  clearStepError('tree');
+  debugLog(`buildTree: source=${source}, seqs=${recs.length}, length=${lengths[0]}, ` +
+    `args=[${args.join(' ') || 'defaults'}], model=${model}, type=${type}, version=${fastTreeVersion()}`);
+  debugLog(`Tree input preview: ${recs[0]?.name} = ${recs[0]?.seq.slice(0, 60)}${recs[0]?.seq.length > 60 ? '…' : ''}`);
   stepStatus('tree', 'running…', 'running');
   status(`Building tree with FastTree (${type === 'nt' ? 'nucleotide' : 'protein'})…`);
   $('tree-run').disabled = true;
@@ -611,9 +700,12 @@ $('tree-run').addEventListener('click', () => {
       stepStatus('tree', `${stats.tips} tips`, 'done');
       recordMeta('Tree', 'FastTree', fastTreeVersion(), args.join(' ') || '(defaults)',
         `${stats.tips} seq alignment`, `tree, ${stats.tips} tips`, performance.now() - t0);
+      debugLog(`Tree OK: ${stats.tips} tips, ${state.newick.length} Newick chars`);
       status(`Tree inferred: ${stats.tips} tips in ${((performance.now() - t0) / 1000).toFixed(2)}s`, 'success');
       $('tree-svg').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     } catch (e) {
+      const detail = e?.stack || String(e);
+      showStepError('tree', `Tree inference failed: ${detail}`);
       status(`Tree inference failed: ${e}`, 'error');
       stepStatus('tree', 'error');
     } finally {

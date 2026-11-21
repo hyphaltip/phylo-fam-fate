@@ -83,6 +83,17 @@ Each step's elapsed time is printed to the browser console
 (`[phylo-fam-fate] …`) and shown in the **timing strip** above the pipeline.
 The same numbers appear in the run metadata table and in the exported JSON.
 
+### Troubleshooting / debug log
+A **Debug log** panel is pinned to the bottom-right of the page. It captures
+console warnings/errors, uncaught exceptions, FastTree arguments and input
+preview, and each step's timing. Use **Copy log** to share it. Step failures
+also appear inline, directly underneath the relevant step (so an error at the
+tree step is visible without scrolling back to the top status bar).
+
+FastTree requires an **alignment**: if you build a tree from unaligned FASTA
+with sequences of different lengths, step 5 shows an inline message asking you
+to run the align step first.
+
 ### Remote APIs (CORS-enabled, callable directly from the browser)
 | API | Use | Rate limit |
 |---|---|---|

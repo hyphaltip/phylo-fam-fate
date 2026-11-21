@@ -25,6 +25,18 @@
   <div id="global-status" class="status-bar"></div>
   <div id="timing-strip" class="timing-strip"></div>
 
+  <!-- Always-visible debug log: console output, errors, WASM details -->
+  <div id="debug-panel" class="debug-panel">
+    <div class="debug-header">
+      <strong>Debug log</strong>
+      <span class="hint">console output, errors, WASM details</span>
+      <button class="btn small" id="debug-copy" type="button">Copy log</button>
+      <button class="btn small" id="debug-clear" type="button">Clear</button>
+      <button class="btn small" id="debug-toggle" type="button">Hide</button>
+    </div>
+    <pre id="debug-log"></pre>
+  </div>
+
   <!-- STEP 1: Input -->
   <section class="step" id="step-input">
     <div class="step-header">
