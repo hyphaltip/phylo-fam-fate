@@ -39,7 +39,7 @@ Search (default: blastp vs Swiss-Prot):
       --no-query           don't add the query sequence(s) to the family
 
 Align / trim / tree:
-  -A, --aligner kalign|muscle                                                  [kalign]
+  -A, --aligner kalign|muscle|mafft   (mafft = E-INS-i style, as in the browser)  [kalign]
   -g, --gap X              trim columns with gap fraction > X; 'none' = no trim [0.5]
   -c, --cons X             trim columns with majority-residue fraction < X     [0]
   -m, --model jtt|lg|wag|nt|gtr   FastTree model (nt/gtr for nucleotides)      [lg]
@@ -49,6 +49,16 @@ Align / trim / tree:
                            double-precision FastTree/FastTreeMP (multithreaded), matching the
                            website's "Double" precision option              [browser]
       --fasttree-args "…"  extra FastTree arguments
+      --tree LIST          tree method(s), comma-separated: fasttree, iqtree, raxml-ng.
+                           The first is the main tree (rooted/annotated); the others are
+                           saved as family.<method>.nwk and compared in trees_compare.tsv [fasttree]
+      --ml-model M         IQ-TREE/RAxML-NG model; MFP = IQ-TREE ModelFinder, and RAxML-NG
+                           then reuses its choice (else LG+G4 / GTR+G4)          [MFP]
+      --raxml-model M      RAxML-NG model, overriding the above
+      --bootstrap N        IQ-TREE ultrafast bootstrap (-B, ≥1000) and RAxML-NG
+                           bootstrap cap (--bs-trees autoMRE{N})                 [1000]
+      --seed N             random seed for IQ-TREE / RAxML-NG                    [12345]
+      --iqtree-args "…" / --raxml-args "…"  extra arguments
 
 Post-processing:
   -r, --root midpoint|mad|none|outgroup:RANK:NAME                              [midpoint]
@@ -70,6 +80,7 @@ ORIG_ARGS=("$@")
 QUERY= QFASTA= FAMILY= ALIGNED= PROTEOMES= EXTRA_DB= SPROT=1
 TOOL=blastp EVALUE=1e-3 HIT_EVALUE=1e-5 MAXHITS=50 HSP_ONLY=0 ADD_QUERY=1
 ALIGNER=kalign GAP=0.5 CONS=0 MODEL=lg GAMMA=1 FT_EXTRA= FT_BUILD=browser
+TREES=fasttree ML_MODEL=MFP RAXML_MODEL= BOOT=1000 SEED=12345 IQ_EXTRA= RAXML_EXTRA=
 ROOT=midpoint RANK=phylum ANNOTATE=1 DOMAINS=1
 OUTDIR=famfate_out DBDIR=${FAMFATE_DB:-famfate_db} THREADS=$(nproc 2>/dev/null || echo 2)
 
@@ -95,6 +106,13 @@ while [ $# -gt 0 ]; do
     --no-gamma) GAMMA=0 ;;
     --fasttree-args) FT_EXTRA=$2; shift ;;
     --fasttree) FT_BUILD=$2; shift ;;
+    --tree) TREES=$2; shift ;;
+    --ml-model) ML_MODEL=$2; shift ;;
+    --raxml-model) RAXML_MODEL=$2; shift ;;
+    --bootstrap) BOOT=$2; shift ;;
+    --seed) SEED=$2; shift ;;
+    --iqtree-args) IQ_EXTRA=$2; shift ;;
+    --raxml-args) RAXML_EXTRA=$2; shift ;;
     -r|--root) ROOT=$2; shift ;;
     --rank) RANK=$2; shift ;;
     --no-annotate) ANNOTATE=0 ;;
@@ -113,7 +131,7 @@ n_inputs=0
 for v in "$QUERY" "$QFASTA" "$FAMILY" "$ALIGNED"; do [ -n "$v" ] && n_inputs=$((n_inputs + 1)); done
 [ "$n_inputs" -eq 1 ] || { echo "famfate.sh: give exactly one of --query, --query-fasta, --family, --aligned (see -h)" >&2; exit 2; }
 case $TOOL in blastp|blastn|phmmer) ;; *) echo "famfate.sh: --tool must be blastp, blastn or phmmer" >&2; exit 2 ;; esac
-case $ALIGNER in kalign|muscle) ;; *) echo "famfate.sh: --aligner must be kalign or muscle" >&2; exit 2 ;; esac
+case $ALIGNER in kalign|muscle|mafft) ;; *) echo "famfate.sh: --aligner must be kalign, muscle or mafft" >&2; exit 2 ;; esac
 
 # Input paths are resolved before we cd into OUTDIR
 abspath() { [ -z "$1" ] && return; [ -e "$1" ] || { echo "famfate.sh: no such file: $1" >&2; exit 2; }; echo "$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"; }
@@ -257,9 +275,16 @@ else
   if [ "$ALIGNER" = kalign ]; then
     s=$(timed kalign -i family.fa -o family.aln.fa)
     record align kalign "$(kalign --version 2>&1 | grep -m1 -o '[0-9][0-9.]*')" "-i -o (defaults)" "$s"
-  else
+  elif [ "$ALIGNER" = muscle ]; then
     s=$(timed muscle -align family.fa -output family.aln.fa -threads "$THREADS")
     record align muscle "$(muscle -version 2>&1 | grep -m1 -o '[0-9][0-9.]*')" "-align (defaults)" "$s"
+  else
+    # E-INS-i style (genafpair, 16 iterations), like the browser's MAFFT
+    t0=$SECONDS
+    mafft --genafpair --ep 0 --maxiterate 16 --thread "$THREADS" --quiet family.fa > family.aln.fa 2>>"$LOG" \
+      || die "mafft failed (see $LOG)"
+    s=$((SECONDS - t0))
+    record align mafft "$(mafft --version 2>&1 | grep -m1 -o 'v[0-9.]*' | tr -d v)" "--genafpair --ep 0 --maxiterate 16" "$s"
   fi
   say "aligned with $ALIGNER (${s}s)"
 fi
@@ -275,33 +300,112 @@ else
   say "$(tail -n1 "$LOG")"
 fi
 
-# ---------------------------------------------------------------- 5. tree
-case $FT_BUILD in
-  browser)
-    FT=FastTree-browser
-    command -v "$FT" >/dev/null || die "FastTree-browser not found: run cli/build-fasttree-browser.sh, or use --fasttree double" ;;
-  double)
-    FT=FastTree; [ "$THREADS" -gt 1 ] && command -v FastTreeMP >/dev/null && FT=FastTreeMP
-    need "$FT" ;;
-  *) die "--fasttree must be 'browser' or 'double'" ;;
-esac
-ftargs=()
-case $MODEL in
-  nt)  ftargs=(-nt) ;;
-  gtr) ftargs=(-nt -gtr) ;;
-  lg)  ftargs=(-lg) ;;
-  wag) ftargs=(-wag) ;;
-  jtt) ftargs=() ;;
-  *) die "--model must be jtt, lg, wag, nt or gtr" ;;
-esac
-if [ "$TYPE" = nt ] && [[ ! " ${ftargs[*]} " =~ " -nt " ]]; then ftargs=(-nt); say "nucleotide alignment detected: using -nt"; fi
-[ "$GAMMA" = 1 ] && ftargs+=(-gamma)
-# shellcheck disable=SC2206
-[ -n "$FT_EXTRA" ] && ftargs+=($FT_EXTRA)
-t0=$SECONDS
-OMP_NUM_THREADS=$THREADS "$FT" "${ftargs[@]}" family.trim.fa > family.nwk 2>>"$LOG" || die "FastTree failed (see $LOG)"
-record tree "$FT" "$("$FT" -expert 2>&1 | head -n1 | sed 's/^Detailed usage for FastTree //; s/:$//')" "${ftargs[*]}" $((SECONDS - t0))
-say "tree: $(grep -o ',' family.nwk | wc -l | awk '{print $1+1}') tips ($FT ${ftargs[*]})"
+# ---------------------------------------------------------------- 5. tree(s)
+ntips() { grep -o '[,(][^(),:;]*:' "$1" | wc -l; }
+
+run_fasttree() {   # → $1
+  local FT
+  case $FT_BUILD in
+    browser)
+      FT=FastTree-browser
+      command -v "$FT" >/dev/null || die "FastTree-browser not found: run cli/build-fasttree-browser.sh, or use --fasttree double" ;;
+    double)
+      FT=FastTree; [ "$THREADS" -gt 1 ] && command -v FastTreeMP >/dev/null && FT=FastTreeMP
+      need "$FT" ;;
+    *) die "--fasttree must be 'browser' or 'double'" ;;
+  esac
+  local ftargs=()
+  case $MODEL in
+    nt)  ftargs=(-nt) ;;
+    gtr) ftargs=(-nt -gtr) ;;
+    lg)  ftargs=(-lg) ;;
+    wag) ftargs=(-wag) ;;
+    jtt) ftargs=() ;;
+    *) die "--model must be jtt, lg, wag, nt or gtr" ;;
+  esac
+  if [ "$TYPE" = nt ] && [[ ! " ${ftargs[*]} " =~ " -nt " ]]; then ftargs=(-nt); say "nucleotide alignment detected: using -nt"; fi
+  [ "$GAMMA" = 1 ] && ftargs+=(-gamma)
+  # shellcheck disable=SC2206
+  [ -n "$FT_EXTRA" ] && ftargs+=($FT_EXTRA)
+  local t0=$SECONDS
+  OMP_NUM_THREADS=$THREADS "$FT" "${ftargs[@]}" family.trim.fa > "$1" 2>>"$LOG" || die "FastTree failed (see $LOG)"
+  record tree "$FT" "$("$FT" -expert 2>&1 | head -n1 | sed 's/^Detailed usage for FastTree //; s/:$//')" "${ftargs[*]}" $((SECONDS - t0))
+  say "FastTree: $(ntips "$1") tips ($FT ${ftargs[*]}, $((SECONDS - t0))s)"
+}
+
+IQ_BEST=
+run_iqtree() {   # → $1 ; ModelFinder (MFP) + UFBoot + SH-aLRT by default
+  local IQ
+  IQ=$(command -v iqtree3 || command -v iqtree2 || command -v iqtree) || die "IQ-TREE not found (iqtree3/iqtree2/iqtree)"
+  mkdir -p iqtree
+  local boot=$BOOT; [ "$boot" -lt 1000 ] && { say "IQ-TREE ultrafast bootstrap needs ≥1000 replicates; using 1000"; boot=1000; }
+  local args=(-s family.trim.fa -m "$ML_MODEL" -B "$boot" -alrt 1000 -T "$THREADS" --seed "$SEED" --prefix iqtree/family -redo)
+  # shellcheck disable=SC2206
+  [ -n "$IQ_EXTRA" ] && args+=($IQ_EXTRA)
+  local s; s=$(timed "$IQ" "${args[@]}")
+  cp iqtree/family.treefile "$1"
+  IQ_BEST=$(grep -m1 -o 'Best-fit model: [^ ]*' iqtree/family.iqtree 2>/dev/null | cut -d' ' -f3 || true)
+  [ -n "$IQ_BEST" ] || IQ_BEST=$(grep -m1 -o '^Model of substitution: .*' iqtree/family.iqtree 2>/dev/null | cut -d' ' -f4 || true)
+  record tree "$(basename "$IQ")" "$("$IQ" --version 2>&1 | grep -m1 -o 'version [0-9.]*' | cut -d' ' -f2)" "${args[*]}${IQ_BEST:+ (model $IQ_BEST)}" "$s"
+  say "IQ-TREE: $(ntips "$1") tips, model ${IQ_BEST:-$ML_MODEL}, support = SH-aLRT/UFBoot (${s}s)"
+}
+
+run_raxml() {   # → $1 ; ML search + bootstrap (autoMRE) + TBE support
+  need raxml-ng
+  mkdir -p raxml
+  local model=$RAXML_MODEL
+  if [ -z "$model" ]; then
+    if [ "$ML_MODEL" != MFP ]; then model=$ML_MODEL
+    # IQ-TREE's best model, if RAxML-NG understands it (plain, +F, +I, +G4)
+    elif [[ "$IQ_BEST" =~ ^[A-Za-z0-9]+(\+F)?(\+I)?(\+G[0-9]*)?$ ]]; then model=$IQ_BEST
+    elif [ "$TYPE" = nt ]; then model=GTR+G4
+    else model=LG+G4; fi
+  fi
+  local args=(--all --msa family.trim.fa --model "$model" --prefix raxml/family --threads "$THREADS"
+              --seed "$SEED" --bs-trees "autoMRE{$BOOT}" --bs-metric tbe --redo)
+  # shellcheck disable=SC2206
+  [ -n "$RAXML_EXTRA" ] && args+=($RAXML_EXTRA)
+  local s; s=$(timed raxml-ng "${args[@]}")
+  local f
+  for f in raxml/family.raxml.supportTBE raxml/family.raxml.support raxml/family.raxml.bestTree; do
+    [ -s "$f" ] && { cp "$f" "$1"; break; }
+  done
+  [ -s "$1" ] || die "RAxML-NG produced no tree (see $LOG)"
+  record tree raxml-ng "$(raxml-ng --version 2>&1 | grep -m1 -o 'RAxML-NG v\. [0-9.]*' | grep -o '[0-9.]*$')" "${args[*]}" "$s"
+  say "RAxML-NG: $(ntips "$1") tips, model $model, support = TBE from $(grep -c . raxml/family.raxml.bootstraps 2>/dev/null || echo '?') bootstraps (${s}s)"
+}
+
+METHODS=()
+for m in ${TREES//,/ }; do
+  case $m in fasttree|iqtree|raxml-ng) METHODS+=("$m") ;; raxml) METHODS+=(raxml-ng) ;; *) die "--tree: unknown method '$m' (fasttree, iqtree, raxml-ng)" ;; esac
+done
+# RAxML-NG can reuse IQ-TREE's ModelFinder result, so run IQ-TREE first if both are requested
+order=(); for m in iqtree fasttree raxml-ng; do [[ " ${METHODS[*]} " =~ " $m " ]] && order+=("$m"); done
+for m in "${order[@]}"; do
+  case $m in
+    fasttree) run_fasttree family.fasttree.nwk ;;
+    iqtree)   run_iqtree family.iqtree.nwk ;;
+    raxml-ng) run_raxml family.raxml-ng.nwk ;;
+  esac
+done
+PRIMARY=${METHODS[0]}
+cp "family.$PRIMARY.nwk" family.nwk
+say "main tree: $PRIMARY (family.nwk)"
+
+# Compare the other trees with the main one (unrooted splits)
+if [ ${#METHODS[@]} -gt 1 ]; then
+  printf 'method\tvs\ttips\tsame_topology\tsplits_only_in_%s\tsplits_only_in_method\trf_distance\tmax_shared_branch_length_diff\n' "$PRIMARY" > trees_compare.tsv
+  for m in "${METHODS[@]:1}"; do
+    $FAMFATE_JS compare-trees family.nwk "family.$m.nwk" > "compare_$m.json" || true
+    node -e '
+      const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      console.log([process.argv[2], process.argv[3], r.tips, r.sameTopology, r.splitsOnlyInA, r.splitsOnlyInB,
+                   r.splitsOnlyInA + r.splitsOnlyInB, r.maxLengthDiff].join("\t"));' "compare_$m.json" "$m" "$PRIMARY" >> trees_compare.tsv
+    rm -f "compare_$m.json"
+  done
+  say "tree comparison (RF = splits not shared):"
+  column -t -s$'\t' trees_compare.tsv 2>/dev/null | sed 's/^/    /' >&2 || cat trees_compare.tsv >&2
+fi
 
 # ---------------------------------------------------------------- 6–9. root, annotate, duplications, export
 postargs=(post --tree family.nwk --fasta family.fa --root "$ROOT" --rank "$RANK" --out family)
@@ -321,6 +425,7 @@ record post famfate-js "$VERSION" "root=$ROOT rank=$RANK annotate=$ANNOTATE doma
 } > run.json
 
 say "done. Outputs in $OUTDIR:"
-for f in family.fa family.aln.fa family.trim.fa family.nwk $(cat post_outputs.txt | xargs -n1 basename 2>/dev/null) run.json run.log; do
+for f in family.fa family.aln.fa family.trim.fa family.nwk family.*.nwk trees_compare.tsv iqtree raxml \
+         $(cat post_outputs.txt | xargs -n1 basename 2>/dev/null) run.json run.log; do
   [ -e "$f" ] && printf '  %s\n' "$f" >&2
 done

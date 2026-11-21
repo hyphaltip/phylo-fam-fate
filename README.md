@@ -57,6 +57,8 @@ Tool versions used in the browser and pinned in the CLI container:
 | Search | HMMER `phmmer` | 3.4 | 3.4 |
 | Align | Kalign | 3.3.1 | 3.3.2 (3.3.1 isn't on bioconda) |
 | Align | MUSCLE | 5.1.0 | 5.1.0 |
+| Align | MAFFT (E-INS-i) | 7.520 | 7.520 |
+| ML tree (CLI) | IQ-TREE / RAxML-NG | — (hand-off script) | 3.1.4 / 2.0.4 |
 | Trim | site's JS (`js/trim.js`) | — | same code, run by Node |
 | Tree | FastTree, via [phylo-fasttree-wasm](https://github.com/hyphaltip/phylo-fasttree-wasm) | 2.1.11, single (default) or double precision | 2.1.11 `FastTree-browser` (default: byte-identical to the site's single precision) or bioconda's `FastTree`/`FastTreeMP` (`--fasttree double`: matches the site's double precision) |
 | Root / annotate / duplications / export | site's JS (`js/tree.js`, `js/annotate.js`, `js/export.js`) | — | same code, run by Node |
@@ -255,8 +257,16 @@ esl-sfetch --index searchset.fa && esl-sfetch -f searchset.fa phmmer_ids.txt > h
 ### Step 3 · Multiple sequence alignment
 
 **Browser.**
-- **Tool**: **Kalign** (very fast; a good default) or **MUSCLE 5** (slower,
-  usually more accurate for divergent families).
+- **Tool**:
+  - **Kalign**: very fast; a good default.
+  - **MUSCLE 5**: slower, usually more accurate for divergent families.
+  - **MAFFT E-INS-i**: MAFFT's most accurate mode for proteins with several
+    domains or long unalignable regions, which suits domain-shuffled gene
+    families. It aligns every pair, so it's slow: best up to ~200 sequences
+    (the page asks before running more).
+    - Biowasm ships MAFFT's core programs but not the `mafft` wrapper, so the
+      page runs them directly with E-INS-i parameters: `tbfast`, then
+      `dvtditr` refinement (16 iterations).
 - **Input**: **Search hits** (from step 2) or **Original input** (step 1).
 - **Align** shows a coloured alignment viewer: residue classes, a ruler,
   every column scrollable, the first 40 sequences. **Download aligned FASTA**
@@ -270,7 +280,8 @@ selected**, the error message says so.
 ```sh
 kalign -i family.fa -o family.aln.fa                  # browser: Kalign 3.3.1
 muscle -align family.fa -output family.aln.fa         # browser: MUSCLE 5.1 (CLI: add -threads 8)
-# Large sets (CLI only): muscle -super5 family.fa -output family.aln.fa
+mafft --genafpair --ep 0 --maxiterate 16 family.fa > family.aln.fa   # browser: MAFFT E-INS-i, 16 iterations (close, not byte-identical)
+# Large sets (CLI only): muscle -super5 family.fa -output family.aln.fa, or mafft --auto
 ```
 
 ### Step 4 · Alignment trimming
@@ -342,9 +353,33 @@ for n, s in zip(names, seqs):
 - **Build tree** runs FastTree in a background worker. A timer and a
   **Cancel** button appear; the page stays usable.
 
-The viewer offers ladderize, cladogram layout, support values (weak ones
-under 0.7 in grey), and **Find tip / species**. Its rooting, colouring,
-domain and duplication controls are described in steps 6–8.
+The viewer offers ladderize, cladogram layout, support values, and **Find
+tip / species**. Weak supports are greyed: below 0.7 (or 70) for single
+values, and below SH-aLRT 80 / UFBoot 95 for IQ-TREE's paired values. Its
+rooting, colouring, domain and duplication controls are described in steps
+6–8.
+
+**Maximum-likelihood trees (IQ-TREE, RAxML-NG).** These are too heavy to run
+in a browser tab, so the tree step hands off to your own machine:
+1. **Run IQ-TREE / RAxML-NG on your machine… → Download run script** saves
+   `run_famfate_<method>.sh`. It contains the alignment the tree step uses
+   (trimmed → aligned → input) and chooses a runner automatically:
+   - a local `famfate.sh`;
+   - Apptainer/Singularity or Docker with the `phylo-fam-fate-cli` image;
+   - otherwise IQ-TREE or RAxML-NG directly, if installed.
+2. Run it (`bash run_famfate_iqtree.sh 8`) on a laptop or cluster.
+3. **Load a tree (Newick)…** with the resulting `famfate_<method>/family.nwk`.
+
+The method choices are:
+- *IQ-TREE 3*: ModelFinder plus ultrafast bootstrap and SH-aLRT;
+- *RAxML-NG*: ML plus bootstrap, with TBE support;
+- *all three*, with IQ-TREE as the main tree.
+
+**Load a tree** accepts any Newick: IQ-TREE `.treefile`/`.contree`,
+RAxML-NG `.support`, or trees from other programs. A loaded tree gets the
+same rooting, annotation, domain and duplication views. Paired support
+labels such as `95.3/98` are kept through rerooting and export. Leaf names
+should match the sequence names, so annotation and descriptions line up.
 
 **CLI equivalent**
 
@@ -354,7 +389,10 @@ FastTree -wag family.trim.fa > family.nwk                     # protein, WAG
 FastTree family.trim.fa > family.nwk                          # protein, JTT (FastTree default)
 FastTree -nt -gtr -gamma family.trim.fa > family.nwk          # nucleotide GTR
 # Multithreaded on the CLI: FastTreeMP (same options)
-# For publication, consider ML with ultrafast bootstrap: iqtree2 -s family.trim.fa -m MFP -B 1000 -T AUTO
+
+# Maximum likelihood (what famfate.sh --tree iqtree / raxml-ng runs)
+iqtree3 -s family.trim.fa -m MFP -B 1000 -alrt 1000 -T AUTO --seed 12345 --prefix iqtree/family
+raxml-ng --all --msa family.trim.fa --model LG+G4 --bs-trees 'autoMRE{1000}' --bs-metric tbe --seed 12345 --prefix raxml/family
 ```
 
 To reproduce the browser's trees on the CLI, match its precision:
@@ -603,7 +641,11 @@ Input (one of):
   -a, --aligned FILE       aligned FASTA: skip search and alignment
 Search:      -p UPID,UPID…  --no-sprot  --db FILE[,FILE]  -t blastp|blastn|phmmer
              -e 1e-3 (search E)  -E 1e-5 (keep-hit E)  -n 50  --hsp-only  --no-query
-Align/tree:  -A kalign|muscle  -g 0.5|none  -c 0  -m lg|wag|jtt|nt|gtr  --no-gamma  --fasttree browser|double  --fasttree-args "…"
+Align:       -A kalign|muscle|mafft  -g 0.5|none  -c 0
+Tree:        --tree fasttree|iqtree|raxml-ng[,…]  (first = main tree; others compared)
+             FastTree: -m lg|wag|jtt|nt|gtr  --no-gamma  --fasttree browser|double  --fasttree-args "…"
+             IQ-TREE / RAxML-NG: --ml-model MFP|<model>  --raxml-model M  --bootstrap 1000  --seed 12345
+                                 --iqtree-args "…"  --raxml-args "…"
 Post:        -r midpoint|mad|none|outgroup:RANK:NAME  --rank phylum  --no-annotate  --no-domains
 General:     -o OUTDIR  -d DBDIR  -T THREADS  -h  -V
 ```
@@ -614,6 +656,30 @@ The defaults match the browser:
 - Alignment and tree: Kalign; trimming at gap fraction 0.5; FastTree LG with
   Gamma (`-lg -gamma`).
 - Post-processing: midpoint root; colours and iTOL at phylum.
+
+**ML trees.** `--tree iqtree` runs IQ-TREE 3:
+- ModelFinder (`-m MFP`) chooses the substitution model;
+- support is ultrafast bootstrap (`-B 1000`) plus SH-aLRT (`-alrt 1000`),
+  written as `SH-aLRT/UFBoot` (e.g. `95.3/98`).
+
+`--tree raxml-ng` runs `raxml-ng --all`:
+- ML search, then bootstrap until converged (`autoMRE{N}`), with transfer
+  bootstrap (TBE) support;
+- RAxML-NG has no ModelFinder. Its model is `--raxml-model` if given, else
+  `--ml-model` if not MFP, else IQ-TREE's chosen model when IQ-TREE ran in
+  the same command and RAxML-NG accepts it, else LG+G4 (protein) / GTR+G4
+  (nucleotide).
+
+Several methods, e.g. `--tree iqtree,raxml-ng,fasttree`:
+- the first is the **main tree**, which gets rooted, annotated and labelled
+  with duplications;
+- every tree is saved as `family.<method>.nwk`;
+- `trees_compare.tsv` lists, for each other method against the main tree:
+  same topology?, splits found in only one of the two, the Robinson–Foulds
+  distance, and the largest branch-length difference on shared splits.
+
+Duplication calls on splits that the methods disagree on deserve less trust
+than those on splits all three recover.
 
 ### Examples
 
@@ -636,6 +702,13 @@ famfate.sh -a my_family.aln.fa --no-annotate -r midpoint
 
 # Domain-only tree: matched regions, no trimming
 famfate.sh -q P46151 --hsp-only -g none
+
+# Publication-style: MAFFT E-INS-i, IQ-TREE main tree, compared with RAxML-NG and FastTree
+famfate.sh -q P46151 -p UP000001805,UP000005640,UP000000625 -A mafft \
+           --tree iqtree,raxml-ng,fasttree -r outgroup:domain:Bacteria -T 16
+
+# RAxML-NG only, with a chosen model
+famfate.sh -a family.aln.fa --tree raxml-ng --raxml-model LG+I+G4 --bootstrap 500
 ```
 
 ### Outputs (in `-o OUTDIR`)
@@ -649,7 +722,10 @@ famfate.sh -q P46151 --hsp-only -g none
 | `phmmer.tbl` | phmmer per-sequence table (with `-t phmmer`) |
 | `family.fa` | Sequences that were aligned (query + hits, deduplicated by name) |
 | `family.aln.fa`, `family.trim.fa` | Alignment and trimmed alignment |
-| `family.nwk` | FastTree output (unrooted) |
+| `family.nwk` | Main tree, unrooted (first `--tree` method) |
+| `family.<method>.nwk` | Each tree built (`fasttree`, `iqtree`, `raxml-ng`) |
+| `iqtree/`, `raxml/` | Full IQ-TREE / RAxML-NG output (`.iqtree` report with the chosen model, `.log`, bootstrap trees) |
+| `trees_compare.tsv` | With several `--tree` methods: topology agreement and RF distance vs the main tree |
 | `family.rooted.nwk` | Rooted, ladderized tree (the browser's "Newick (rooted, as shown)") |
 | `family.svg` | Tree drawn by the browser's renderer: taxon colours, domain track, duplication markers |
 | `family.annotations.tsv` | One row per leaf: ranks, protein/gene, length, Pfam, domain coordinates, function |
@@ -695,8 +771,13 @@ workflow builds the image and runs `cli/tests/ci.sh` inside it:
    - the MET12/MET13 duplication is labelled;
    - iTOL files are written;
    - MAD rooting is applied.
-4. **phmmer** with outgroup rooting, and **option errors**.
-5. **Apptainer:** the image is converted to a SIF and run with
+4. **phmmer** with outgroup rooting.
+5. **ML trees:** IQ-TREE + RAxML-NG + FastTree on one alignment. It checks
+   that all three trees are written, that IQ-TREE's is the main tree, that
+   the `SH-aLRT/UFBoot` labels survive rooting, that `trees_compare.tsv` is
+   filled in, and that the chosen model is recorded. Also MAFFT E-INS-i.
+6. **Option errors.**
+7. **Apptainer:** the image is converted to a SIF and run with
    `apptainer exec`.
 
 The image is pushed only if all of these pass.

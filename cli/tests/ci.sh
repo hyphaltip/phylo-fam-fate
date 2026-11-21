@@ -20,6 +20,9 @@ blastp -version | head -n1
 phmmer -h | grep -m1 HMMER
 kalign --version 2>&1 | head -n1 || true
 muscle -version 2>&1 | head -n1
+mafft --version 2>&1 | head -n1
+iqtree3 --version 2>&1 | head -n1
+raxml-ng --version 2>&1 | grep -m1 RAxML
 FastTree -expert 2>&1 | head -n1
 FastTree-browser -expert 2>&1 | head -n1
 node --version
@@ -89,9 +92,22 @@ famfate.sh -q P46151 -p UP000002311,UP000000625 --no-sprot -t phmmer -E 1e-5 \
 check "phmmer hits"                        test -s t5/phmmer.tbl
 check "outgroup rooting reported"          grep -q 'Bacteria' t5/family.post.json
 
-section "6. option errors"
+section "6. ML trees: IQ-TREE + RAxML-NG + FastTree, compared"
+famfate.sh --aligned "$SITE/cli/tests/data/aa_aligned.fa" --tree iqtree,raxml-ng,fasttree --no-annotate -o t6 -T 2 2>t6.err >/dev/null || { tail -n 40 t6.err; bad "pipeline ran"; }
+check "IQ-TREE tree"                       test -s t6/family.iqtree.nwk
+check "RAxML-NG tree"                      test -s t6/family.raxml-ng.nwk
+check "FastTree tree"                      test -s t6/family.fasttree.nwk
+check "main tree is IQ-TREE's"             cmp -s t6/family.nwk t6/family.iqtree.nwk
+check "SH-aLRT/UFBoot labels kept after rooting" grep -qE '\)[0-9.]+/[0-9.]+:' t6/family.rooted.nwk
+check "trees_compare.tsv has 2 rows"       test "$(tail -n +2 t6/trees_compare.tsv | wc -l)" -eq 2
+check "IQ-TREE model recorded"             grep -q 'model ' t6/run.json
+famfate.sh --family "$EX/proteins.fa" --aligner mafft --no-annotate -o t6b -T 2 >/dev/null 2>t6b.err || { cat t6b.err; bad "pipeline ran"; }
+check "MAFFT alignment, 16 sequences"      test "$(grep -c '>' t6b/family.aln.fa)" -eq 16
+
+section "7. option errors"
 check "rejects two inputs"   bash -c '! famfate.sh -q P46151 --family x.fa 2>/dev/null'
 check "rejects bad tool"     bash -c '! famfate.sh -q P46151 -t diamond 2>/dev/null'
+check "rejects bad tree"     bash -c '! famfate.sh -a /opt/phylo-fam-fate/cli/tests/data/aa_aligned.fa --tree phyml --no-annotate -o bad 2>/dev/null'
 
 echo
 if [ "$fail" = 0 ]; then echo "All container tests passed"; else echo "Some container tests FAILED"; fi

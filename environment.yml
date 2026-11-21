@@ -1,6 +1,6 @@
 # Command-line toolchain for phylo-fam-fate (cli/famfate.sh).
 # Versions are pinned to what the browser runs, so CLI and web results match:
-#   BLAST+ 2.17.0, HMMER 3.4, MUSCLE 5.1.0, FastTree 2.1.11 (same as the site);
+#   BLAST+ 2.17.0, HMMER 3.4, MUSCLE 5.1.0, MAFFT 7.520, FastTree 2.1.11 (same as the site);
 #   Kalign 3.3.2 (the site runs 3.3.1, which bioconda doesn't carry).
 # BLAST+ 2.17.0 is linux-64/osx only on bioconda, so this environment and the
 # container are x86-64 (Apple Silicon: osx-arm64 works natively for conda).
@@ -14,6 +14,9 @@ dependencies:
   - kalign3=3.3.2
   - muscle=5.1.0
   - fasttree=2.1.11
+  - mafft=7.520          # same version as the browser (biowasm)
+  - iqtree=3.1.4         # ML trees: ModelFinder, UFBoot, SH-aLRT (--tree iqtree)
+  - raxml-ng=2.0.4       # ML trees with bootstrap/TBE (--tree raxml-ng)
   - trimal
   - seqkit
   - nodejs>=20

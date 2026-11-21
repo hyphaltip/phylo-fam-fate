@@ -37,11 +37,12 @@ export async function initTools(tools) {
 
 /** Exact Biowasm tool versions, recorded in run metadata for provenance. */
 export const TOOL_VERSIONS = {
-  muscle: '5.1.0', kalign: '3.3.1', blastp: '2.17.0', blastn: '2.17.0', blastdbcmd: '2.17.0', phmmer: '3.4',
+  muscle: '5.1.0', kalign: '3.3.1', mafft: '7.520', blastp: '2.17.0', blastn: '2.17.0', blastdbcmd: '2.17.0', phmmer: '3.4',
 };
 
 /** Mount a FASTA string as a virtual file, run an aligner, return aligned FASTA. */
 export async function runAligner(tool, fasta) {
+  if (tool === 'mafft') return runMafft(fasta);
   await initTools([`${tool}/${TOOL_VERSIONS[tool]}`]);
   // Unique file names per run: a stale aligned.fa from an earlier run would
   // otherwise be returned silently if this run fails to write its output.
@@ -71,6 +72,54 @@ export async function runAligner(tool, fasta) {
     // was found") comes before the stack of "Function ... failed" lines.
     const log = execText(result).trim();
     throw new Error(`${tool} produced no alignment.\n${log.slice(-2000)}`);
+  }
+  return out;
+}
+
+/**
+ * MAFFT in E-INS-i mode (accurate for multi-domain proteins; O(N²) pairwise
+ * alignments, so practical up to a couple of hundred sequences). Biowasm
+ * ships MAFFT's two core programs, not the `mafft` shell wrapper, so this
+ * runs them directly with E-INS-i parameters, following biowasm's MAFFT
+ * example: tbfast (generalized affine pairwise alignment, then progressive
+ * alignment) writes "pre", and dvtditr refines it (16 iterations).
+ * CLI equivalent: mafft --genafpair --ep 0 --maxiterate 16 in.fa
+ */
+async function runMafft(fasta) {
+  const v = TOOL_VERSIONS.mafft;
+  await initTools([`mafft/tbfast/${v}`, `mafft/dvtditr/${v}`]);
+  const recs = fastaRecords(fasta);
+  // MAFFT's internal format is happiest with plain names; feed it numbered
+  // names and restore the originals (by order, which MAFFT preserves).
+  const numbered = recs.map((r, i) => `>s${i}\n${r.seq.replace(/[-.]/g, '')}`).join('\n') + '\n';
+  const tag = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const inputName = `mafft_${tag}.fa`;
+  await cli.mount([{ name: inputName, data: numbered }]);
+  // "pre" is a fixed name: remove any previous run's output first, so a
+  // failure here can't silently return an older alignment.
+  try { await cli.fs.unlink('/shared/data/pre'); } catch { /* not there */ }
+  const log1 = execText(await cli.exec(`tbfast _ -u 0.0 -l 2.7 -C 0 -b 62 -g 0.0 -f -2.00 -Q 100.0 -h 0.0 -O -6.00 -E -0.000 -N -Z _ -+ 16 -W 0.00001 -V -1.53 -s 0.0 -O -C 0 -b 62 -f -1.53 -Q 100.0 -h 0.000 -l 2.7 -X 0.1 -i ${inputName}`));
+  const log2 = execText(await cli.exec('dvtditr -W 0.00001 -E 0.0 -s 0.0 -C 0 -t 0 -F -l 2.7 -z 50 -b 62 -f -1.53 -Q 100.0 -h 0.000 -I 16 -X 0.1 -p BAATARI2 -K 0 -i /shared/data/pre'));
+  let out = '';
+  try { out = await cli.cat('/shared/data/pre'); } catch { /* none */ }
+  const aligned = fastaRecords(out);
+  if (aligned.length !== recs.length) {
+    throw new Error(`mafft produced ${aligned.length} of ${recs.length} sequences.\n${(log1 + '\n' + log2).trim().slice(-2000)}`);
+  }
+  const byNum = new Map(aligned.map(r => [r.name, r.seq.toUpperCase()]));
+  return recs.map((r, i) => {
+    const seq = byNum.get(`s${i}`);
+    if (seq == null) throw new Error(`mafft output is missing sequence ${i + 1} (${r.name})`);
+    return `>${r.name}\n${seq}`;
+  }).join('\n') + '\n';
+}
+
+/** Minimal FASTA reader (names = first word), local to the tool wrappers. */
+function fastaRecords(text) {
+  const out = [];
+  for (const line of String(text || '').split(/\r?\n/)) {
+    if (line.startsWith('>')) out.push({ name: line.slice(1).trim().split(/\s+/)[0], seq: '' });
+    else if (out.length) out[out.length - 1].seq += line.trim();
   }
   return out;
 }

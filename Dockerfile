@@ -40,9 +40,11 @@ USER $MAMBA_USER
 
 # PATH is set explicitly (not only via the micromamba entrypoint) so that
 # `apptainer exec` / `singularity exec`, which skip ENTRYPOINT, find the tools.
+# FAMFATE_DB is deliberately unset: the default ./famfate_db is created in the
+# working directory: /data under Docker (mounted), your own cwd under Apptainer
+# (where the image itself, including /data, is read-only).
 ENV PATH=/opt/conda/bin:/usr/local/bin:$PATH \
     FAMFATE_SITE=/opt/phylo-fam-fate \
-    FAMFATE_DB=/data/famfate_db \
     HOME=/tmp
 WORKDIR /data
 CMD ["famfate.sh", "--help"]

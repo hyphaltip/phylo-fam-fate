@@ -213,6 +213,7 @@
           <select id="align-tool">
             <option value="kalign">Kalign</option>
             <option value="muscle">MUSCLE</option>
+            <option value="mafft" title="E-INS-i mode: most accurate for proteins with several domains or long unalignable regions; slow (pairwise), so best up to ~200 sequences">MAFFT E-INS-i (multi-domain; ≤200 seqs)</option>
           </select>
         </label>
         <label>Input
@@ -280,6 +281,27 @@
         <span class="hint running-timer hidden" id="tree-elapsed"></span>
       </div>
       <p class="hint" id="tree-input-note">The tree uses the most processed data available: trimmed → aligned → input.</p>
+      <div class="row tree-extra">
+        <label class="btn small ghost file-btn" title="Show a tree made elsewhere (IQ-TREE .treefile/.contree, RAxML-NG .support, any Newick) in this viewer, with rooting, annotation, domains and duplications">Load a tree (Newick)…
+          <input type="file" id="tree-load" accept=".nwk,.newick,.tre,.tree,.treefile,.contree,.support,.raxml.support,.txt" hidden></label>
+        <details class="handoff" id="handoff">
+          <summary class="btn small ghost">Run IQ-TREE / RAxML-NG on your machine…</summary>
+          <div class="handoff-body">
+            <p class="hint">Maximum-likelihood trees with model selection and bootstrap are too heavy for the browser. Download a script that contains <b>this alignment</b> (the one the tree step uses) and runs <code>famfate.sh</code> on your computer or cluster, using Apptainer/Singularity or Docker, or IQ-TREE / RAxML-NG directly if installed. Then load the resulting <code>family.nwk</code> here.</p>
+            <div class="row">
+              <label>Method
+                <select id="handoff-method">
+                  <option value="iqtree">IQ-TREE 3: ModelFinder + UFBoot & SH-aLRT</option>
+                  <option value="raxml-ng">RAxML-NG: ML + bootstrap (TBE)</option>
+                  <option value="iqtree,raxml-ng,fasttree">All three, compared (IQ-TREE as main tree)</option>
+                </select>
+              </label>
+              <label>Bootstrap <input type="number" id="handoff-boot" value="1000" min="100" step="100" style="width:6rem"></label>
+              <button class="btn small primary" id="handoff-download" type="button">Download run script</button>
+            </div>
+          </div>
+        </details>
+      </div>
       <div id="tree-results" class="hidden">
         <div class="tree-toolbar">
           <label>Root

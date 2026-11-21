@@ -887,6 +887,8 @@ $('align-run').addEventListener('click', async () => {
 
   const tool = $('align-tool').value;
   const type = seqType(fasta);
+  if (tool === 'mafft' && nSeq > 200 &&
+      !confirm(`MAFFT E-INS-i aligns every pair of sequences, so ${nSeq} sequences may take a long time in the browser. Continue? (Kalign is much faster.)`)) return;
   stepStatus('align', 'running…', 'running');
   status(`Aligning with ${tool}…`);
   $('align-run').disabled = true;
@@ -909,7 +911,9 @@ $('align-run').addEventListener('click', async () => {
     $('trim-run').disabled = false;
     stepStatus('align', `${recs.length} × ${alen}`, 'done');
     recordMeta('Align', tool, TOOL_VERSIONS[tool],
-      tool === 'muscle' ? `-align (defaults; ${type})` : `-i -o (defaults; ${type})`,
+      tool === 'muscle' ? `-align (defaults; ${type})`
+        : tool === 'mafft' ? `E-INS-i: tbfast + dvtditr, 16 iterations (≈ mafft --genafpair --ep 0 --maxiterate 16; ${type})`
+        : `-i -o (defaults; ${type})`,
       `${recs.length} seq`, `${recs.length} × ${alen} alignment`, performance.now() - t0);
     status(`Aligned ${recs.length} sequences (${alen} columns)`, 'success');
     stepStatus('trim', 'ready');
@@ -1222,7 +1226,7 @@ function branchPopup(node, evt) {
   const ev = node.event === 'dup' ? 'Duplication node' : node.event === 'spec' ? 'Speciation node' : '';
   showPopup(`
     <div class="pop-title">Clade of ${names.length} tip${names.length === 1 ? '' : 's'}</div>
-    <div class="pop-sub">${node.support != null ? `support ${node.support} · ` : ''}branch length ${(+node.length).toPrecision(3)}${ev ? ` · <b>${ev}</b>` : ''}</div>
+    <div class="pop-sub">${node.support != null ? `support ${escapeHtml(node.supportLabel || String(node.support))} · ` : ''}branch length ${(+node.length).toPrecision(3)}${ev ? ` · <b>${ev}</b>` : ''}</div>
     ${species.size ? `<div class="pop-species">${species.size} species: <i>${[...species].slice(0, 6).map(escapeHtml).join(', ')}${species.size > 6 ? '…' : ''}</i></div>` : ''}
     <div class="pop-actions">
       <button class="btn small primary" type="button" data-act="root">Root on this branch</button>
@@ -1326,23 +1330,7 @@ $('tree-run').addEventListener('click', async () => {
   try {
     const precision = $('tree-precision').value;
     const { newick, ms } = await ftCall({ fasta, args, precision });
-    state.newick = newick;
-    state.tree = parseNewick(newick);
-    const stats = treeStats(state.tree);
-    // A new tree invalidates branch-based choices from the previous one.
-    state.rootClade = null; state.selectedClade = null; madCache = null;
-    $('tv-root').querySelector('option[value="branch"]').disabled = true;
-    if ($('tv-root').value === 'branch') $('tv-root').value = 'midpoint';
-    hidePopup();
-    $('newick-output').textContent = newick;
-    $('tree-results').classList.remove('hidden');
-    renderTree();
-    // Annotate automatically when leaves look like UniProt records or carry
-    // OS= descriptions; keep any annotations already fetched for these labels.
-    const labels = stats.names;
-    if (labels.some(l => accessionOf(l) || /\bOS=/.test(state.descs.get(l) || ''))) {
-      if (!labels.every(l => state.annotations.has(l))) annotateTree({ quiet: true });
-    }
+    const stats = adoptTree(newick);
     stepStatus('tree', `${stats.tips} tips`, 'done');
     recordMeta('Tree', 'FastTree', `${state.ftVersion} (${precision} precision)`, args.join(' ') || '(defaults)',
       `${recs.length} × ${lengths[0]} ${source} alignment`, `tree, ${stats.tips} tips`, ms);
@@ -1364,6 +1352,122 @@ $('tree-run').addEventListener('click', async () => {
     $('tree-cancel').classList.add('hidden');
   }
 });
+
+/** Show a new tree (built here or loaded from a file) in the viewer. */
+function adoptTree(newick) {
+  const tree = parseNewick(newick.trim());
+  const stats = treeStats(tree);
+  if (stats.tips < 2) throw new Error('not a Newick tree with at least 2 tips');
+  state.newick = newick.trim();
+  state.tree = tree;
+  // A new tree invalidates branch-based choices from the previous one.
+  state.rootClade = null; state.selectedClade = null; madCache = null;
+  $('tv-root').querySelector('option[value="branch"]').disabled = true;
+  if ($('tv-root').value === 'branch') $('tv-root').value = 'midpoint';
+  hidePopup();
+  $('newick-output').textContent = state.newick;
+  $('tree-results').classList.remove('hidden');
+  renderTree();
+  // Annotate automatically when leaves look like UniProt records or carry
+  // OS= descriptions; keep any annotations already fetched for these labels.
+  const labels = stats.names;
+  if (labels.some(l => accessionOf(l) || /\bOS=/.test(state.descs.get(l) || ''))) {
+    if (!labels.every(l => state.annotations.has(l))) annotateTree({ quiet: true });
+  }
+  return stats;
+}
+
+$('tree-load').addEventListener('change', async e => {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    const text = await file.text();
+    // Take the first tree if the file holds several (e.g. bootstrap sets)
+    const first = text.trim().split(/;\s*/)[0] + ';';
+    const stats = adoptTree(first);
+    const support = /\)[0-9.]+\/[0-9.]+/.test(first) ? 'SH-aLRT/UFBoot' : /\)[0-9.]+/.test(first) ? 'single values' : 'none';
+    stepStatus('tree', `${stats.tips} tips (loaded)`, 'done');
+    recordMeta('Tree', 'loaded file', '—', file.name, `${(file.size / 1024).toFixed(1)} kB Newick`, `tree, ${stats.tips} tips; support: ${support}`, 0);
+    const known = state.records.length ? stats.names.filter(n => state.records.some(r => r.name === n)).length : 0;
+    status(`Loaded ${file.name}: ${stats.tips} tips` + (state.records.length ? ` (${known} match loaded sequences)` : ''), 'success');
+    $('tree-results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } catch (err) {
+    showStepError('tree', `Could not read ${file.name} as Newick: ${err.message}`);
+    status(`Could not load tree: ${err.message}`, 'error');
+  }
+});
+
+/* Hand-off: a self-contained shell script with the alignment embedded, which
+   runs famfate.sh (IQ-TREE / RAxML-NG) via Apptainer, Docker, a local
+   install, or the ML programs directly. */
+$('handoff-download').addEventListener('click', () => {
+  const fasta = state.trimmedFasta || state.alignedFasta || state.rawFasta;
+  if (!fasta) { status('Align sequences first (step 3): the script needs an alignment', 'error'); return; }
+  const recs = parseFasta(fasta);
+  const lens = new Set(recs.map(r => r.seq.length));
+  if (lens.size !== 1) { status('Sequences are not aligned yet: run step 3 first', 'error'); return; }
+  const source = state.trimmedFasta ? 'trimmed' : state.alignedFasta ? 'aligned' : 'input';
+  const methods = $('handoff-method').value;
+  const boot = Math.max(100, parseInt($('handoff-boot').value, 10) || 1000);
+  const tag = methods.split(',')[0];
+  const body = recs.map(r => `>${r.name}\n${r.seq}`).join('\n');
+  const script = handoffScript({ methods, boot, tag, body, n: recs.length, len: [...lens][0], source, type: seqType(fasta) });
+  download(`run_famfate_${tag}.sh`, script, 'text/x-shellscript');
+  recordMeta('Hand-off', 'famfate.sh', VERSION, `--tree ${methods} --bootstrap ${boot}`, `${recs.length} × ${[...lens][0]} ${source} alignment`, `run_famfate_${tag}.sh`, 0);
+  status(`Saved run_famfate_${tag}.sh: run "bash run_famfate_${tag}.sh", then load famfate_${tag}/family.nwk here`, 'success');
+});
+
+function handoffScript({ methods, boot, tag, body, n, len, source, type }) {
+  const iqOnly = methods === 'iqtree', rxOnly = methods === 'raxml-ng';
+  return `#!/usr/bin/env bash
+# phylo-fam-fate hand-off: ${methods} on ${n} sequences × ${len} columns (${source} alignment)
+# Generated ${new Date().toISOString()} by ${location.origin}${location.pathname}
+#
+#   bash run_famfate_${tag}.sh [THREADS]
+#
+# Writes famfate_${tag}/ with family.nwk (the ${tag} tree), family.rooted.nwk,
+# SVG, annotations and iTOL files. Load family.nwk in the website's step 5,
+# "Load a tree (Newick)", to explore it with rooting, colours, domains and
+# duplications. Runs famfate.sh from (first found): a local install, Apptainer/
+# Singularity, or Docker (image ghcr.io/hyphaltip/phylo-fam-fate-cli), else
+# ${iqOnly ? 'IQ-TREE' : rxOnly ? 'RAxML-NG' : 'IQ-TREE / RAxML-NG'} directly if installed.
+set -euo pipefail
+THREADS=\${1:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}
+IMAGE=\${FAMFATE_IMAGE:-ghcr.io/hyphaltip/phylo-fam-fate-cli:edge}
+OUT=famfate_${tag}
+
+cat > family.aln.fa <<'FAMFATE_ALIGNMENT_EOF'
+${body}
+FAMFATE_ALIGNMENT_EOF
+
+# The browser already trimmed/aligned this, so don't trim again (--gap none).
+ARGS=(--aligned family.aln.fa --gap none --tree ${methods} --bootstrap ${boot} -T "$THREADS" -o "$OUT")
+
+if command -v famfate.sh >/dev/null 2>&1; then
+  famfate.sh "\${ARGS[@]}"
+elif A=$(command -v apptainer || command -v singularity); then
+  "$A" exec "docker://$IMAGE" famfate.sh "\${ARGS[@]}"
+elif command -v docker >/dev/null 2>&1; then
+  docker run --rm -u "$(id -u):$(id -g)" -v "$PWD":/data "$IMAGE" famfate.sh "\${ARGS[@]}"
+${rxOnly ? `elif command -v raxml-ng >/dev/null 2>&1; then
+  mkdir -p "$OUT"
+  raxml-ng --all --msa family.aln.fa --model ${'$'}{RAXML_MODEL:-${type === 'nt' ? 'GTR+G4' : 'LG+G4'}} --prefix "$OUT/family" --threads "$THREADS" --seed 12345 --bs-trees "autoMRE{${boot}}" --bs-metric tbe
+  for f in "$OUT/family.raxml.supportTBE" "$OUT/family.raxml.support" "$OUT/family.raxml.bestTree"; do
+    [ -s "$f" ] && { cp "$f" "$OUT/family.nwk"; break; }
+  done` :
+  `elif IQ=$(command -v iqtree3 || command -v iqtree2 || command -v iqtree); then
+  mkdir -p "$OUT"
+  "$IQ" -s family.aln.fa -m MFP -B ${Math.max(1000, boot)} -alrt 1000 -T "$THREADS" --seed 12345 --prefix "$OUT/family"
+  cp "$OUT/family.treefile" "$OUT/family.nwk"`}
+else
+  echo "Need one of: famfate.sh, apptainer/singularity, docker, ${rxOnly ? 'raxml-ng' : 'iqtree3/iqtree2'}" >&2
+  echo "Install e.g.: mamba install -c conda-forge -c bioconda ${rxOnly ? 'raxml-ng' : 'iqtree'}" >&2
+  exit 1
+fi
+echo "Done. Load $OUT/family.nwk in phylo-fam-fate (step 5 → Load a tree)."
+`;
+}
 
 $('newick-copy').addEventListener('click', async () => {
   try {

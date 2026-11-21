@@ -1,6 +1,8 @@
 /* Newick parser and SVG phylogenetic tree renderer. */
 
 const NUMERIC = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
+// IQ-TREE writes several supports per node, e.g. "95.3/98" (SH-aLRT/UFBoot)
+const MULTI_SUPPORT = /^[+-]?(\d+\.?\d*|\.\d+)(\/[+-]?(\d+\.?\d*|\.\d+))+$/;
 
 /** Parse a Newick string into a nested tree object. */
 export function parseNewick(s) {
@@ -49,6 +51,13 @@ export function parseNewick(s) {
         // FastTree writes support as e.g. "0.950"; String(0.95) !== "0.950",
         // so test the lexical form rather than round-tripping the number.
         if (NUMERIC.test(label)) node.support = parseFloat(label);
+        else if (MULTI_SUPPORT.test(label)) {
+          // Keep every value for display/export; use the last (UFBoot for
+          // IQ-TREE's SH-aLRT/UFBoot) as the node's numeric support.
+          const vals = label.split('/').map(Number);
+          node.support = vals[vals.length - 1];
+          node.supportLabel = label;
+        }
         else node.name = label;
       }
     } else {
@@ -101,7 +110,7 @@ function undirected(root) {
   const adj = new Map(nodes.map(n => [n, []]));
   for (const n of nodes) {
     for (const c of n.children) {
-      const e = { len: c.length, support: c.support, child: c, parent: n };
+      const e = { len: c.length, support: c.support, label: c.supportLabel, child: c, parent: n };
       adj.get(n).push({ to: c, e });
       adj.get(c).push({ to: n, e });
     }
@@ -114,19 +123,20 @@ function undirected(root) {
  *  are copied so callers can keep referring to nodes. */
 function rootOnEdge(adj, e, toChild) {
   toChild = Math.max(0, Math.min(e.len, toChild));
-  function build(node, from, length, support) {
-    const out = { ...node, length, support, children: [] };
+  function build(node, from, length, support, label) {
+    const out = { ...node, length, support, supportLabel: label, children: [] };
     for (const { to, e: edge } of adj.get(node)) {
       if (to === from || edge === e) continue;
-      out.children.push(build(to, node, edge.len, edge.support));
+      out.children.push(build(to, node, edge.len, edge.support, edge.label));
     }
     // A former internal node that is now a leaf can't keep a support label;
     // nor can a degree-2 node (old root) which simply passes through.
-    if (!out.children.length) out.support = null;
+    if (!out.children.length) { out.support = null; delete out.supportLabel; }
+    if (out.supportLabel === undefined) delete out.supportLabel;
     return out;
   }
-  const a = build(e.child, e.parent, toChild, e.support);
-  const b = build(e.parent, e.child, e.len - toChild, e.support);
+  const a = build(e.child, e.parent, toChild, e.support, e.label);
+  const b = build(e.parent, e.child, e.len - toChild, e.support, e.label);
   return { name: '', length: 0, support: null, children: [a, b] };
 }
 
@@ -470,8 +480,12 @@ export function drawTree(svg, root, opts = {}) {
   if (opts.showSupport) {
     for (const node of all) {
       if (node.support === null || !node.children.length || node === root) continue;
-      const weak = node.support < 0.7 || (node.support > 1 && node.support < 70);
-      parts.push(`<text x="${(node._px - 3).toFixed(1)}" y="${(node._y - 4).toFixed(1)}" class="t-support${weak ? ' weak' : ''}" text-anchor="end">${formatSupport(node.support)}</text>`);
+      // Weak: < 0.7 on a 0–1 scale; < 70 on a 0–100 scale; for SH-aLRT/UFBoot
+      // pairs, the usual thresholds (SH-aLRT < 80 or UFBoot < 95).
+      const vals = node.supportLabel ? node.supportLabel.split('/').map(Number) : null;
+      const weak = vals && vals.length === 2 ? (vals[0] < 80 || vals[1] < 95)
+        : node.support < 0.7 || (node.support > 1 && node.support < 70);
+      parts.push(`<text x="${(node._px - 3).toFixed(1)}" y="${(node._y - 4).toFixed(1)}" class="t-support${weak ? ' weak' : ''}" text-anchor="end">${escapeXml(node.supportLabel || formatSupport(node.support))}</text>`);
     }
   }
 

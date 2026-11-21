@@ -11,7 +11,7 @@ export function toNewick(node) {
   const walk = n => {
     const len = n.length ? `:${+n.length.toPrecision(6)}` : '';
     if (!n.children.length) return q(n.name) + len;
-    return `(${n.children.map(walk).join(',')})${n.support != null ? n.support : ''}${len}`;
+    return `(${n.children.map(walk).join(',')})${n.supportLabel ?? (n.support != null ? n.support : '')}${len}`;
   };
   return walk(node) + ';';
 }
@@ -74,7 +74,7 @@ export function eventsTsv(tree, annotations) {
     if (n.event) {
       const names = leafNames(n);
       const sp = new Set(names.map(x => annotations.get(x)?.species).filter(Boolean));
-      rows.push([`n${++i}`, n.event === 'dup' ? 'duplication' : 'speciation', n.support ?? '', names.length, [...sp].join('; '), names.join(',')].map(tsvCell).join('\t'));
+      rows.push([`n${++i}`, n.event === 'dup' ? 'duplication' : 'speciation', n.supportLabel ?? n.support ?? '', names.length, [...sp].join('; '), names.join(',')].map(tsvCell).join('\t'));
     }
     n.children.forEach(walk);
   };
