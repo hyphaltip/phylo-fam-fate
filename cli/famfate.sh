@@ -130,7 +130,20 @@ die()  { say "ERROR: $*"; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "'$1' not found on PATH (use the container, or: mamba env create -f environment.yml)"; }
 # record STEP TOOL VERSION PARAMS — appended to run.json at the end
 record() { STEPS+=("$(printf '{"step":"%s","tool":"%s","version":"%s","params":"%s","seconds":%s}' "$1" "$2" "$3" "${4//\"/\\\"}" "$5")"); }
-timed()  { local t0=$SECONDS; "$@" >>"$LOG" 2>&1 || die "command failed: $* (see $LOG)"; echo $((SECONDS - t0)); }
+# timed CMD… : run CMD with output to the log; print its runtime (s). On failure,
+# show the command's exit status and last lines of output, then stop.
+timed()  {
+  local t0=$SECONDS out rc=0
+  out=$(mktemp)
+  "$@" >"$out" 2>&1 || rc=$?
+  cat "$out" >> "$LOG"
+  if [ "$rc" -ne 0 ]; then
+    say "command failed (exit $rc): $*"
+    tail -n 25 "$out" | sed 's/^/    | /' | tee -a "$LOG" >&2
+    rm -f "$out"; die "stopping (full log: $LOG)"
+  fi
+  rm -f "$out"; echo $((SECONDS - t0))
+}
 nseq()   { grep -c '^>' "$1" || true; }
 
 need node

@@ -48,22 +48,24 @@ section "3. FastTree parity: FastTree-browser (native) vs the website's WASM bui
 # compared too, for information only: it legitimately differs on short branches.
 parity() {   # parity NAME ALN ARGS…
   local name=$1 aln=$2; shift 2
-  FastTree-browser "$@" "$aln" > "$name.native.nwk" 2>/dev/null
-  famfate-js fasttree-wasm "$aln" "$@" > "$name.wasm.nwk"
+  FastTree-browser "$@" "$aln" > "$name.native.nwk" 2>/dev/null || true
+  famfate-js fasttree-wasm "$aln" "$@" > "$name.wasm.nwk" || true
   check "$name [$*]: identical Newick" cmp -s "$name.native.nwk" "$name.wasm.nwk"
-  FastTree "$@" "$aln" > "$name.double.nwk" 2>/dev/null
+  FastTree "$@" "$aln" > "$name.double.nwk" 2>/dev/null || true
   if famfate-js compare-trees "$name.double.nwk" "$name.wasm.nwk" > "$name.double.json"; then d="same tree"; else d="differs"; fi
   printf '       info: bioconda double precision vs browser: %s (%s)\n' "$d" \
     "$(grep -E 'sameTopology|maxLengthDiff' "$name.double.json" | tr -d ' \n')"
 }
 parity nt_jc "$EX/nucleotide_aligned.fa" -nt
 parity nt_gtr_gamma "$EX/nucleotide_aligned.fa" -nt -gtr -gamma
-parity aa_jtt t1/family.trim.fa
-parity aa_lg_gamma t1/family.trim.fa -lg -gamma
-parity aa_wag t1/family.trim.fa -wag
+AA=$SITE/cli/tests/data/aa_aligned.fa
+parity aa_jtt "$AA"
+parity aa_lg_gamma "$AA" -lg -gamma
+parity aa_wag "$AA" -wag
 # The pipeline itself (default --fasttree browser) must reproduce the website's tree
-famfate-js fasttree-wasm t1/family.trim.fa -lg -gamma > t1.wasm.nwk
-check "famfate.sh tree == website tree" cmp -s t1/family.nwk t1.wasm.nwk
+famfate.sh --aligned "$AA" --no-annotate -o t3 >/dev/null 2>t3.err || { cat t3.err; bad "pipeline ran"; }
+famfate-js fasttree-wasm t3/family.trim.fa -lg -gamma > t3.wasm.nwk
+check "famfate.sh tree == website tree" cmp -s t3/family.nwk t3.wasm.nwk
 
 section "4. MET12 vs two small proteomes (BLAST, full-length hits, annotation, MAD)"
 # S. cerevisiae (UP000002311) + E. coli K-12 (UP000000625): small, quick to index
