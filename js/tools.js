@@ -96,9 +96,13 @@ async function ensureBlastDb(source, dbType, onProgress) {
   const log = execText(await cli.exec(
     `makeblastdb -in ${file} -dbtype ${dbType} -out ${name} -blastdb_version 4`));
   const added = log.match(/added\s+(\d+)\s+sequences/i);
-  // Only fail on an explicit error: depending on Aioli's output mode the
-  // "added N sequences" summary may not be captured at all.
-  if (/BLAST options error|Error:/i.test(log)) {
+  // The WASM build always prints a harmless
+  // "Error: (106.19) ... SetFullVersion() should be used ..." line, so a
+  // reported sequence count is the real success signal. Only fail when
+  // there is no count *and* a genuine error remains after dropping that line.
+  const realErrors = log.split('\n')
+    .filter(l => /BLAST options error|Error:/i.test(l) && !/SetFullVersion/.test(l));
+  if (!added && realErrors.length) {
     throw new Error(`makeblastdb failed for ${source.label || file}:\n${log.trim().slice(-1500)}`);
   }
   const info = { name, sequences: added ? parseInt(added[1], 10) : null };
