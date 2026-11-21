@@ -49,11 +49,17 @@ Choose a **Database source** from the dropdown in step 2:
    (~94 MB gzipped, ~565k proteins) is streamed directly from
    `ftp.uniprot.org`. Biowasm builds a local BLAST index in the browser; the
    file is never fully loaded into JS memory.
-2. **UniProt reference proteome** — loads the
+2. **UniProt reference proteomes** — loads the
    [`reference_proteomes/README`](https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/reference_proteomes/README)
    catalogue (~37,600 proteomes) and shows a searchable dropdown. Filter by
-   species name, proteome ID (`UP…`), or taxon ID, then click **Load proteome**.
-   The selected proteome's `<ID>_<TAXID>.fasta.gz` is streamed for BLAST.
+   species name, proteome ID (`UP…`), or taxon ID, then click **Add to search
+   set** (or double-click). Repeat to build a **search set** of several
+   proteomes, optionally plus Swiss-Prot. Each proteome's
+   `<ID>_<TAXID>.fasta.gz` is streamed into Biowasm and indexed as its own
+   BLAST database; BLAST then searches them together (E-values reflect the
+   combined size). Built indexes are cached for the session, so adding one
+   more proteome only indexes the new one. Sets above ~1.5M proteins get a
+   warning because in-browser indexing becomes slow.
 3. **PDB SEQRES** — `pdb_seqres.txt.gz` from `files.wwpdb.org`. That server does
    **not** send CORS headers, so the browser cannot fetch it directly. Either
    download the file and use *Custom file*, or provide a CORS-proxy prefix

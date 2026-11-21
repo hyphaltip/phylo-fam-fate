@@ -2,6 +2,9 @@
 
 let cli = null;
 const requestedTools = new Set();
+// BLAST databases already built in the current Aioli filesystem, keyed by
+// source URL + type. Cleared whenever Aioli is re-created (new filesystem).
+const builtDbs = new Map();
 
 function parseSpec(spec) {
   const p = spec.split('/');
@@ -28,6 +31,7 @@ export async function initTools(tools) {
   // Use Aioli's default output mode: exec() returns a plain string. Some
   // programs (notably BLAST) do not populate stdout when printInterleaved=false.
   cli = await new Aioli([...requestedTools].map(parseSpec));
+  builtDbs.clear();
   return cli;
 }
 
@@ -71,42 +75,71 @@ export async function runAligner(tool, fasta) {
   return out;
 }
 
-/** Run local BLAST against a user-provided FASTA database. */
-export async function runBlast(program, queryFasta, dbFasta, maxHits, dbUrl) {
+/** Short stable id for a string (file names in the WASM filesystem). */
+function shortHash(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(36);
+}
+
+/** Mount one FASTA source and build a v4 BLAST database from it (cached). */
+async function ensureBlastDb(source, dbType, onProgress) {
+  const key = `${dbType}\u0000${source.url || 'inline:' + shortHash(source.data)}`;
+  if (builtDbs.has(key)) return builtDbs.get(key);
+  const id = shortHash(key);
+  const file = source.url ? `db_${id}.fa.gz` : `db_${id}.fa`;
+  const name = `bdb_${id}`;
+  onProgress?.(`Indexing ${source.label || file}…`);
+  await cli.mount([source.url ? { name: file, url: source.url } : { name: file, data: source.data }]);
+  // v5 databases use LMDB, which is unavailable in the WASM filesystem;
+  // v4 uses traditional .pin/.psq index files and works in-browser.
+  const log = execText(await cli.exec(
+    `makeblastdb -in ${file} -dbtype ${dbType} -out ${name} -blastdb_version 4`));
+  const added = log.match(/added\s+(\d+)\s+sequences/i);
+  // Only fail on an explicit error: depending on Aioli's output mode the
+  // "added N sequences" summary may not be captured at all.
+  if (/BLAST options error|Error:/i.test(log)) {
+    throw new Error(`makeblastdb failed for ${source.label || file}:\n${log.trim().slice(-1500)}`);
+  }
+  const info = { name, sequences: added ? parseInt(added[1], 10) : null };
+  builtDbs.set(key, info);
+  return info;
+}
+
+/**
+ * Run local BLAST against one or more FASTA sources.
+ * @param {{url?: string, data?: string, label?: string}[]} sources - each URL
+ *   is streamed into the WASM filesystem (never fully held in JS memory) and
+ *   indexed separately; blastp/blastn then searches them together.
+ */
+export async function runBlast(program, queryFasta, sources, maxHits, onProgress) {
   // Biowasm exposes each BLAST binary as a separate program (there is no
   // monolithic `blast.js`), so request the chosen program plus makeblastdb.
   await initTools([`blast/${program}/2.17.0`, 'blast/makeblastdb/2.17.0']);
-  // Mounting a URL streams it into the WASM filesystem without loading the
-  // whole (possibly 100 MB) FASTA into JS memory. BLAST reads gzip directly.
-  const dbMount = dbUrl
-    ? { name: 'db.fa.gz', url: dbUrl }
-    : { name: 'db.fa', data: dbFasta };
-  await cli.mount([
-    { name: 'query.fa', data: queryFasta },
-    dbMount,
-  ]);
-  const dbFile = dbUrl ? 'db.fa.gz' : 'db.fa';
-  // Build a local BLAST database from the mounted FASTA
   const isNucleotide = program === 'blastn';
   const dbType = isNucleotide ? 'nucl' : 'prot';
-  // v5 databases use LMDB, which is unavailable in the WASM filesystem;
-  // v4 uses traditional .pin/.psq index files and works in-browser.
-  await cli.exec(`makeblastdb -in ${dbFile} -dbtype ${dbType} -out mydb -blastdb_version 4`);
-  // Use a small word size for short queries; disable low-complexity masking so
-  // tandem-repeat queries aren't filtered out entirely. Use a permissive
-  // E-value here — the UI applies live cutoffs client-side.
-  // Each flag must be a separate argv element (Aioli array form).
+  const dbs = [];
+  for (const [i, src] of sources.entries()) {
+    onProgress?.(`Preparing database ${i + 1}/${sources.length}: ${src.label || 'custom'}…`);
+    dbs.push(await ensureBlastDb(src, dbType, onProgress));
+  }
+  await cli.mount([{ name: 'query.fa', data: queryFasta }]);
+  onProgress?.(`Running ${program} against ${dbs.length} database${dbs.length > 1 ? 's' : ''}…`);
+  // Disable low-complexity masking so tandem-repeat queries aren't filtered
+  // out entirely. Use a permissive E-value — the UI applies live cutoffs.
   const filter = isNucleotide ? ['-task', 'blastn', '-dust', 'no'] : ['-seg', 'no'];
-  // Include sseq so hit sequences can be built without re-reading the DB.
-  // Array form is required because the outfmt string contains spaces.
+  // Array form: each flag is one argv element. A multi-database -db is a
+  // single space-separated argument, which BLAST treats as one combined set
+  // (E-values are computed against the total size of all of them).
   const result = await cli.exec(program, [
-    '-query', 'query.fa', '-db', 'mydb', ...filter,
+    '-query', 'query.fa', '-db', dbs.map(d => d.name).join(' '), ...filter,
     '-evalue', '1000', '-max_target_seqs', String(maxHits),
     '-outfmt', '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore sseq',
   ]);
   const text = execText(result);
   if (!text.trim()) throw new Error(`${program} produced no hits — try a different query/database`);
-  return text;
+  const known = dbs.every(d => d.sequences != null);
+  return { text, sequences: known ? dbs.reduce((n, d) => n + d.sequences, 0) : null };
 }
 
 /** Run local phmmer against a user-provided FASTA database.

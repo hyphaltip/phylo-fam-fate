@@ -118,7 +118,7 @@
           <label>Database source
             <select id="search-db-preset">
               <option value="uniprot-sprot" selected>UniProt Swiss-Prot (reviewed, ~565k)</option>
-              <option value="uniprot-reference">UniProt reference proteome…</option>
+              <option value="uniprot-reference">UniProt reference proteomes…</option>
               <option value="pdb">PDB SEQRES (~160k chains)</option>
               <option value="custom">Custom file / URL</option>
             </select>
@@ -137,7 +137,16 @@
             <label>Reference proteome
               <select id="proteome-select" style="width:36rem"></select>
             </label>
-            <button class="btn small" id="proteome-load" type="button">Load proteome</button>
+            <button class="btn small" id="proteome-add" type="button">Add to search set</button>
+          </div>
+          <div class="proteome-set-box">
+            <div class="proteome-set-head">
+              <strong>Search set</strong> <span class="hint" id="proteome-set-summary">empty — add one or more proteomes</span>
+              <span class="spacer"></span>
+              <label class="checkbox inline"><input type="checkbox" id="proteome-with-sprot"> Also include Swiss-Prot</label>
+              <button class="btn small ghost" id="proteome-clear" type="button">Clear</button>
+            </div>
+            <ul class="chips" id="proteome-set"></ul>
           </div>
         </div>
 

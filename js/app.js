@@ -13,7 +13,9 @@ const state = {
   rawFasta: '',       // original input sequences
   dbFasta: '',        // search database held in memory (custom / phmmer)
   dbIndex: null,      // Map name -> seq for dbFasta (built once, reused by phmmer)
-  dbUrl: '',          // streamed DB URL (BLAST presets)
+  dbSources: [],      // streamed DB URLs [{url, label}] (BLAST presets / proteome set)
+  dbFastaKey: '',     // which dbSources the in-memory dbFasta was downloaded from
+  proteomeSet: [],    // reference proteomes chosen for the search set
   dbSource: '',       // human-readable DB source
   dbPreset: 'uniprot-sprot',
   proteomes: [],      // reference proteome catalogue
@@ -409,22 +411,26 @@ async function fetchDb(url, label) {
   return decoded;
 }
 
-/** Describe a URL-backed DB in the UI. */
-function setDbUrl(url, label, note = '') {
-  state.dbUrl = url;
+/** Describe a URL-backed DB (one or more streamed files) in the UI. */
+function setDbSources(sources, label, note = '') {
+  state.dbSources = sources;
   state.dbFasta = '';
+  state.dbFastaKey = '';
   state.dbIndex = null;
   state.dbSource = label;
   $('search-db-info').innerHTML =
-    `<strong>${escapeHtml(label)}</strong>${note ? ' · ' + note : ''} · streamed into Biowasm at search time (nothing uploaded)`;
+    `<strong>${escapeHtml(label)}</strong>${note ? ' · ' + escapeHtml(note) : ''} · streamed into Biowasm at search time (nothing uploaded)`;
   stepStatus('search', 'db ready');
 }
+const setDbUrl = (url, label, note) => setDbSources([{ url, label }], label, note);
+const dbReady = () => state.dbSources.length > 0 || !!state.dbFasta;
 
 /** Describe an in-memory DB in the UI. */
 function setSearchDb({ text, records, gzipped, bytes }, source) {
   state.dbFasta = text;
   state.dbIndex = new Map(records.map(r => [r.name, r.seq]));
-  state.dbUrl = '';
+  state.dbSources = [];
+  state.dbFastaKey = '';
   state.dbSource = source;
   const size = gzipped ? `${bytes.toLocaleString()} B gzipped → ${text.length.toLocaleString()} B` : `${text.length.toLocaleString()} B`;
   $('search-db-info').innerHTML = `<strong>${escapeHtml(source)}</strong> · ${records.length.toLocaleString()} sequences · ${size} · ready to search`;
@@ -444,17 +450,15 @@ function applyDbPreset() {
     setDbUrl(SPROT_URL, 'UniProt Swiss-Prot',
       `${UNIPROT_FTP.split('/')[2]}, 94 MB gzipped, ~565k reviewed proteins`);
   } else if (preset === 'uniprot-reference') {
-    state.dbUrl = ''; state.dbFasta = '';
-    $('search-db-info').textContent = 'Choose a reference proteome below, then click “Load proteome”.';
-    stepStatus('search', 'choose proteome');
     loadProteomeCatalog();
+    applyProteomeSet();
   } else if (preset === 'pdb') {
     const proxy = $('search-proxy').value.trim();
     const url = proxy ? proxy + encodeURIComponent(PDB_URL) : PDB_URL;
     setDbUrl(url, 'PDB SEQRES',
       proxy ? 'via CORS proxy' : 'direct URL (CORS-blocked — see note)');
   } else {
-    state.dbUrl = ''; state.dbFasta = '';
+    state.dbSources = []; state.dbFasta = ''; state.dbFastaKey = '';
     $('search-db-info').textContent = 'Provide a FASTA database as a local file or a CORS-enabled URL.';
     stepStatus('search', 'choose db');
   }
@@ -493,15 +497,59 @@ function renderProteomeOptions() {
 }
 $('proteome-filter').addEventListener('input', renderProteomeOptions);
 
-$('proteome-load').addEventListener('click', () => {
+function proteomeUrl(p) {
+  const division = p.division.charAt(0).toUpperCase() + p.division.slice(1);
+  return `${UNIPROT_FTP}/reference_proteomes/${division}/${p.id}/${p.id}_${p.taxid}.fasta.gz`;
+}
+
+// Above this the in-browser makeblastdb step gets slow and memory-hungry.
+const SET_WARN_PROTEINS = 1_500_000;
+
+/** Turn the chosen proteomes (+ optional Swiss-Prot) into the search DB. */
+function applyProteomeSet() {
+  const set = state.proteomeSet;
+  const withSprot = $('proteome-with-sprot').checked;
+  $('proteome-set').innerHTML = set.map(p => `
+    <li title="${escapeAttr(p.name)}">${escapeHtml(trunc(p.name, 40))} <small>${p.id} · ${p.count.toLocaleString()}</small>
+      <button type="button" data-remove="${escapeAttr(p.id)}" aria-label="Remove ${escapeAttr(p.name)}">×</button></li>`).join('');
+  const proteins = set.reduce((n, p) => n + p.count, 0) + (withSprot ? 570_000 : 0);
+  const summary = $('proteome-set-summary');
+  summary.classList.toggle('warn', proteins > SET_WARN_PROTEINS);
+  if (!set.length && !withSprot) {
+    summary.textContent = 'empty — add one or more proteomes';
+    state.dbSources = []; state.dbFasta = ''; state.dbFastaKey = '';
+    $('search-db-info').textContent = 'Filter the catalogue, pick a proteome and click “Add to search set”. Repeat to search several at once.';
+    stepStatus('search', 'choose proteomes');
+    return;
+  }
+  summary.textContent = `${set.length} proteome${set.length === 1 ? '' : 's'}${withSprot ? ' + Swiss-Prot' : ''} · ~${proteins.toLocaleString()} proteins` +
+    (proteins > SET_WARN_PROTEINS ? ' — large: indexing in the browser may be slow' : '');
+  const sources = set.map(p => ({ url: proteomeUrl(p), label: `${p.name} (${p.id})`, id: p.id }));
+  if (withSprot) sources.unshift({ url: SPROT_URL, label: 'UniProt Swiss-Prot', id: 'sprot' });
+  const label = sources.length === 1 ? sources[0].label
+    : `${sources.length} databases: ${sources.map(x => x.id).join(', ')}`;
+  setDbSources(sources, label, `~${proteins.toLocaleString()} proteins`);
+}
+
+$('proteome-add').addEventListener('click', () => {
   const id = $('proteome-select').value;
   const p = state.proteomes.find(x => x.id === id);
   if (!p) { status('Select a reference proteome first', 'error'); return; }
-  const division = p.division.charAt(0).toUpperCase() + p.division.slice(1);
-  const url = `${UNIPROT_FTP}/reference_proteomes/${division}/${p.id}/${p.id}_${p.taxid}.fasta.gz`;
-  setDbUrl(url, `${p.name} (${p.id})`, `${p.count.toLocaleString()} proteins`);
-  status(`Selected ${p.name} — ready to search`, 'success');
+  if (state.proteomeSet.some(x => x.id === id)) { status(`${p.name} is already in the search set`, ''); return; }
+  state.proteomeSet.push(p);
+  applyProteomeSet();
+  status(`Added ${p.name} — ${state.proteomeSet.length} proteome${state.proteomeSet.length === 1 ? '' : 's'} in the search set`, 'success');
 });
+$('proteome-set').addEventListener('click', e => {
+  const id = e.target.closest('[data-remove]')?.dataset.remove;
+  if (!id) return;
+  state.proteomeSet = state.proteomeSet.filter(p => p.id !== id);
+  applyProteomeSet();
+});
+$('proteome-clear').addEventListener('click', () => { state.proteomeSet = []; applyProteomeSet(); });
+$('proteome-with-sprot').addEventListener('change', applyProteomeSet);
+// Double-click an option to add it straight away
+$('proteome-select').addEventListener('dblclick', () => $('proteome-add').click());
 
 // --- Custom DB file / URL ------------------------------------------------------
 $('search-db').addEventListener('change', async () => {
@@ -535,7 +583,7 @@ $('search-db-url-load').addEventListener('click', async () => {
 
 $('search-enable').addEventListener('change', () => {
   $('search-options').classList.toggle('hidden', !$('search-enable').checked);
-  if ($('search-enable').checked && !state.dbUrl && !state.dbFasta) {
+  if ($('search-enable').checked && !dbReady()) {
     status('Choose a database source for the local search', 'info');
   }
 });
@@ -636,7 +684,7 @@ $('hit-use-selected').addEventListener('click', () => {
 $('search-run').addEventListener('click', async () => {
   const tool = $('search-tool').value;
   if (!state.rawFasta) { status('Load input sequences first', 'error'); return; }
-  if (!state.dbUrl && !state.dbFasta) { status('Choose a database source first', 'error'); return; }
+  if (!dbReady()) { status('Choose a database source first', 'error'); return; }
 
   const maxHits = parseInt($('search-maxhits').value, 10) || 50;
   stepStatus('search', 'running…', 'running');
@@ -647,13 +695,20 @@ $('search-run').addEventListener('click', async () => {
     let hits;
     if (tool === 'phmmer') {
       // phmmer needs the DB as a readable file; fetch/decode it if URL-backed.
-      let dbFasta = state.dbFasta;
-      if (!dbFasta && state.dbUrl) {
-        const decoded = await fetchDb(state.dbUrl, state.dbSource);
-        dbFasta = decoded.text;
-        state.dbFasta = dbFasta; // cache for subsequent phmmer runs
-        state.dbIndex = new Map(decoded.records.map(r => [r.name, r.seq]));
+      // phmmer cannot stream: download every source and concatenate them.
+      const key = state.dbSources.map(x => x.url).join('\n');
+      if (state.dbSources.length && state.dbFastaKey !== key) {
+        const texts = [];
+        for (const [i, src] of state.dbSources.entries()) {
+          status(`Downloading database ${i + 1}/${state.dbSources.length}: ${src.label}…`);
+          texts.push((await fetchDb(src.url, src.label)).text);
+        }
+        state.dbFasta = texts.map(t => t.trimEnd()).join('\n') + '\n';
+        state.dbFastaKey = key; // cache for subsequent phmmer runs
+        state.dbIndex = null;
       }
+      const dbFasta = state.dbFasta;
+      status('Running phmmer locally…');
       const out = await runPhmmer(state.rawFasta, dbFasta);
       hits = parsePhmmerHits(out);
       // phmmer does not report sequences; recover them from the in-memory DB.
@@ -662,7 +717,12 @@ $('search-run').addEventListener('click', async () => {
       $('search-preview').textContent = out.slice(0, 3000);
     } else {
       // BLAST embeds full subject sequences (sseq) in its tabular output.
-      const out = await runBlast(tool, state.rawFasta, state.dbFasta, maxHits, state.dbUrl);
+      const sources = state.dbSources.length
+        ? state.dbSources
+        : [{ data: state.dbFasta, label: state.dbSource }];
+      const { text: out, sequences } = await runBlast(tool, state.rawFasta, sources, maxHits, msg => status(msg));
+      debugLog(`BLAST searched ${sources.length} database(s)${sequences != null ? `, ${sequences.toLocaleString()} sequences` : ''}: ` +
+        sources.map(x => x.label).join('; '));
       hits = parseBlastHits(out);
       $('search-preview').textContent = out.slice(0, 3000);
     }

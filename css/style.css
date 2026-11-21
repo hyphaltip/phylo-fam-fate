@@ -199,3 +199,17 @@ footer a { color: var(--primary); }
   .stepper a { min-width: 5.5rem; font-size: 0.8rem; }
   .msa-name { flex-basis: 6rem; }
 }
+
+/* ---- Reference proteome search set ------------------------------------- */
+.proteome-set-box { border: 1px solid var(--border); border-radius: var(--radius); padding: 0.6rem 0.75rem; margin-bottom: 0.75rem; background: #f8fafc; }
+.proteome-set-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; }
+.proteome-set-head .hint { margin: 0; }
+.proteome-set-head .spacer { flex: 1; }
+.chips { list-style: none; display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.5rem 0 0; padding: 0; }
+.chips:empty { display: none; }
+.chips li { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.2rem 0.3rem 0.2rem 0.65rem; border-radius: 1rem;
+  background: white; border: 1px solid #bfdbfe; font-size: 0.8rem; }
+.chips li small { color: var(--muted); font-family: var(--mono); }
+.chips button { border: none; background: #e2e8f0; color: #475569; width: 1.3rem; height: 1.3rem; border-radius: 50%; cursor: pointer; line-height: 1; font-size: 0.85rem; }
+.chips button:hover { background: var(--danger); color: white; }
+.hint.warn { color: #b45309; }
