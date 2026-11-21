@@ -81,16 +81,24 @@ After a search, every hit is shown in a table with **E-value**, **score**,
 length**. Live cutoffs (`E-value ≤`, `Score ≥`, `% identity ≥`, `Align length ≥`)
 filter the table as you type. Use **Select all** / **Select none** or individual
 checkboxes, then **Use selected for alignment** to pass only those sequences to
-step 3. BLAST subject sequences are taken from the `sseq` column of the tabular
-output, and phmmer hits are recovered from the in-memory DB by subject ID.
+step 3. phmmer hits are recovered from the in-memory DB by subject ID.
 
 Hits are grouped **one row per subject protein**. When BLAST reports several
 HSPs (local alignments) to the same protein, or several queries hit it, the row
 shows the best HSP and an **“N HSPs ▸”** toggle that expands the individual
 alignments with their subject coordinates. A protein passes the cutoffs if its
-best HSP does. Its sequence for alignment is the best HSP extended by any
-overlapping or adjacent HSPs. Residues between separated HSPs aren't in BLAST's
-output, so those gaps stay unfilled.
+best HSP does. The **Subject range / length** column shows which part of the
+protein the HSPs cover.
+
+**Full-length sequences** (on by default) aligns each selected protein's whole
+sequence. Databases are built with `makeblastdb -parse_seqids`, and after the
+search `blastdbcmd -entry_batch` pulls every subject by accession from the same
+in-browser databases, with no extra download. Untick it to align only the
+regions BLAST matched (useful for single-domain trees): the best HSP, extended
+by any overlapping or adjacent HSPs. A database whose headers can't be
+ID-indexed (e.g. duplicate IDs) is rebuilt without `-parse_seqids`. Its hits
+fall back to the HSP region and are flagged **HSP only**. phmmer hits are
+always full-length.
 
 ### Runtime timing
 Each step's elapsed time is printed to the browser console

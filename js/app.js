@@ -289,7 +289,7 @@ $('load-example-aa').addEventListener('click', () => loadExample('proteins.fa', 
 $('load-example-nt').addEventListener('click', () => loadExample('nucleotide_aligned.fa', 'example nucleotide alignment'));
 
 function showMsa(id, fasta, type) {
-  renderMsa($(id), fasta, { type });
+  renderMsa($(id), fasta, { type, maxCols: 5000 });
   $(id).classList.remove('hidden');
 }
 
@@ -594,6 +594,9 @@ $('search-enable').addEventListener('change', () => {
 // BLAST reports one row per HSP, so one subject protein can appear several
 // times (several local alignments, or hits from several queries). Hits are
 // grouped by subject: one selectable row per protein, its HSPs nested below.
+// Each group keeps both the full-length subject (from blastdbcmd, or the
+// in-memory DB for phmmer) and the HSP-derived fragment; the "Full-length"
+// checkbox chooses which one is aligned.
 // Group keys are stable numeric ids assigned after sorting (not names, which
 // can contain characters awkward in HTML attributes).
 const hitKey = g => String(g.id);
@@ -610,6 +613,8 @@ function passesCutoffs(h) {
 }
 /** A protein passes if its best HSP does. */
 const groupPasses = g => passesCutoffs(g.best);
+const useFull = () => $('hit-full-length').checked;
+const groupSeq = g => (useFull() && g.fullSeq) || g.hspSeq;
 
 /** Combine one subject's HSPs into the longest contiguous stretch of subject
  *  residues that contains the best HSP. Overlapping/adjacent HSPs extend it;
@@ -641,7 +646,9 @@ function groupHits(hits) {
   groups.forEach((g, i) => {
     g.id = i;
     g.queries = [...new Set(g.hsps.map(h => h.query))];
-    g.seq = mergeHspSeq(g.hsps, g.best);
+    g.hspSeq = mergeHspSeq(g.hsps, g.best);
+    g.fullSeq = g.hsps.find(h => h.fullSeq)?.fullSeq || '';
+    g.slen = g.best.slen || (g.fullSeq ? g.fullSeq.length : null);
     const spans = g.hsps.filter(h => h.sstart != null).map(h => [Math.min(h.sstart, h.send), Math.max(h.sstart, h.send)]);
     g.range = spans.length ? [Math.min(...spans.map(s => s[0])), Math.max(...spans.map(s => s[1]))] : null;
   });
@@ -670,8 +677,8 @@ function renderHits() {
       <td>${fmtE(h.evalue)}</td>
       <td>${h.score.toFixed(1)}</td>
       <td>${h.pident == null ? '—' : h.pident.toFixed(1)}</td>
-      <td title="${escapeAttr(`${g.seq.length} residues used for alignment`)}">${h.length == null ? '—' : h.length}</td>
-      <td>${g.range ? `${g.range[0]}–${g.range[1]}` : '—'}</td>
+      <td title="${escapeAttr(`${groupSeq(g).length} residues will be aligned (${useFull() && g.fullSeq ? 'full-length' : 'HSP region'})`)}">${h.length == null ? '—' : h.length}</td>
+      <td>${g.range ? `${g.range[0]}–${g.range[1]}` : '—'}${g.slen ? ` <span class="hint">/ ${g.slen}</span>` : ''}${useFull() && !g.fullSeq ? ' <span class="hsp-only" title="Full-length sequence unavailable; the HSP region will be aligned">HSP only</span>' : ''}</td>
     </tr>`;
     if (open) row += g.hsps.map((x, i) => `<tr class="hsp-row${passesCutoffs(x) ? '' : ' filtered-out'}">
       <td></td>
@@ -714,6 +721,7 @@ $('hit-table-body').addEventListener('click', e => {
   renderHits();
 });
 
+$('hit-full-length').addEventListener('change', renderHits);
 ['hit-evalue', 'hit-score', 'hit-pident', 'hit-length'].forEach(id => {
   $(id).addEventListener('input', renderHits);
 });
@@ -726,7 +734,7 @@ $('hit-select-none').addEventListener('click', () => {
 });
 
 $('hit-use-selected').addEventListener('click', () => {
-  const picked = state.hitGroups.filter(g => state.selectedHits.has(hitKey(g)) && groupPasses(g) && g.seq);
+  const picked = state.hitGroups.filter(g => state.selectedHits.has(hitKey(g)) && groupPasses(g) && groupSeq(g));
   // Groups are already one per subject; queries may share a name with a hit
   // (FastTree rejects duplicate names), so skip those.
   const seen = new Set();
@@ -737,7 +745,7 @@ $('hit-use-selected').addEventListener('click', () => {
   for (const g of picked) {
     if (seen.has(g.name)) continue;
     seen.add(g.name);
-    out.push({ name: g.name, seq: g.seq });
+    out.push({ name: g.name, seq: groupSeq(g) });
   }
   const chosen = out;
   if (!chosen.length) { status('No usable sequences in the selection', 'error'); return; }
@@ -746,10 +754,11 @@ $('hit-use-selected').addEventListener('click', () => {
   $('align-input').querySelector('option[value="search"]').textContent = `Search hits (${chosen.length})`;
   stepStatus('search', `${chosen.length} selected`, 'done');
   status(`${chosen.length} sequences ready for alignment`, 'success');
-  const merged = picked.filter(g => g.hsps.length > 1).length;
+  const nFull = useFull() ? picked.filter(g => g.fullSeq).length : 0;
+  const merged = picked.filter(g => g.hsps.length > 1 && !(useFull() && g.fullSeq)).length;
   recordMeta('Select hits', 'browser', VERSION, 'cutoffs + manual selection; HSPs grouped per subject',
     `${state.hitGroups.length} proteins (${state.searchHits.length} HSPs)`,
-    `${chosen.length} sequences (${picked.length} proteins${merged ? `, ${merged} with multiple HSPs merged` : ''}${$('hit-include-query').checked ? ', + queries' : ''})`, null);
+    `${chosen.length} sequences (${picked.length} proteins: ${nFull} full-length, ${picked.length - nFull} HSP region${merged ? `, ${merged} with multiple HSPs merged` : ''}${$('hit-include-query').checked ? ', + queries' : ''})`, null);
 });
 
 // --- Run the search ------------------------------------------------------------
@@ -785,17 +794,21 @@ $('search-run').addEventListener('click', async () => {
       hits = parsePhmmerHits(out);
       // phmmer does not report sequences; recover them from the in-memory DB.
       state.dbIndex ||= new Map(parseFasta(dbFasta).map(r => [r.name, r.seq]));
-      hits.forEach(h => { h.seq = state.dbIndex.get(h.name) || ''; });
+      hits.forEach(h => { h.seq = h.fullSeq = state.dbIndex.get(h.name) || ''; });
       $('search-preview').textContent = out.slice(0, 3000);
     } else {
       // BLAST embeds full subject sequences (sseq) in its tabular output.
       const sources = state.dbSources.length
         ? state.dbSources
         : [{ data: state.dbFasta, label: state.dbSource }];
-      const { text: out, sequences } = await runBlast(tool, state.rawFasta, sources, maxHits, msg => status(msg));
+      const { text: out, sequences, full } = await runBlast(tool, state.rawFasta, sources, maxHits, msg => status(msg));
       debugLog(`BLAST searched ${sources.length} database(s)${sequences != null ? `, ${sequences.toLocaleString()} sequences` : ''}: ` +
         sources.map(x => x.label).join('; '));
       hits = parseBlastHits(out);
+      for (const h of hits) h.fullSeq = full.get(h.acc) || full.get(h.name) || '';
+      const nFull = new Set(hits.filter(h => h.fullSeq).map(h => h.name)).size;
+      const nSubj = new Set(hits.map(h => h.name)).size;
+      debugLog(`Full-length sequences retrieved for ${nFull}/${nSubj} subjects (blastdbcmd)`);
       $('search-preview').textContent = out.slice(0, 3000);
     }
     $('search-preview').classList.remove('hidden');

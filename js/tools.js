@@ -37,7 +37,7 @@ export async function initTools(tools) {
 
 /** Exact Biowasm tool versions, recorded in run metadata for provenance. */
 export const TOOL_VERSIONS = {
-  muscle: '5.1.0', kalign: '3.3.1', blastp: '2.17.0', blastn: '2.17.0', phmmer: '3.4',
+  muscle: '5.1.0', kalign: '3.3.1', blastp: '2.17.0', blastn: '2.17.0', blastdbcmd: '2.17.0', phmmer: '3.4',
 };
 
 /** Mount a FASTA string as a virtual file, run an aligner, return aligned FASTA. */
@@ -93,19 +93,32 @@ async function ensureBlastDb(source, dbType, onProgress) {
   await cli.mount([source.url ? { name: file, url: source.url } : { name: file, data: source.data }]);
   // v5 databases use LMDB, which is unavailable in the WASM filesystem;
   // v4 uses traditional .pin/.psq index files and works in-browser.
-  const log = execText(await cli.exec(
-    `makeblastdb -in ${file} -dbtype ${dbType} -out ${name} -blastdb_version 4`));
-  const added = log.match(/added\s+(\d+)\s+sequences/i);
-  // The WASM build always prints a harmless
-  // "Error: (106.19) ... SetFullVersion() should be used ..." line, so a
-  // reported sequence count is the real success signal. Only fail when
-  // there is no count *and* a genuine error remains after dropping that line.
-  const realErrors = log.split('\n')
-    .filter(l => /BLAST options error|Error:/i.test(l) && !/SetFullVersion/.test(l));
-  if (!added && realErrors.length) {
+  // -parse_seqids indexes the IDs so blastdbcmd can return full-length
+  // subjects later. It rejects some custom headers (e.g. duplicate IDs), so
+  // fall back to an unindexed build rather than failing the search.
+  const build = async parse => {
+    const log = execText(await cli.exec(
+      `makeblastdb -in ${file} -dbtype ${dbType} -out ${name} -blastdb_version 4${parse ? ' -parse_seqids' : ''}`));
+    const added = log.match(/added\s+(\d+)\s+sequences/i);
+    // The WASM build always prints a harmless
+    // "Error: (106.19) ... SetFullVersion() should be used ..." line, so a
+    // reported sequence count is the real success signal. Only fail when
+    // there is no count *and* a genuine error remains after dropping that line.
+    const realErrors = log.split('\n')
+      .filter(l => /BLAST options error|Error:/i.test(l) && !/SetFullVersion/.test(l));
+    return { log, added, ok: !!added || !realErrors.length };
+  };
+  let parsed = true;
+  let { log, added, ok } = await build(true);
+  if (!ok) {
+    onProgress?.(`${source.label || file}: IDs could not be indexed; full-length sequences unavailable for it`);
+    parsed = false;
+    ({ log, added, ok } = await build(false));
+  }
+  if (!ok) {
     throw new Error(`makeblastdb failed for ${source.label || file}:\n${log.trim().slice(-1500)}`);
   }
-  const info = { name, sequences: added ? parseInt(added[1], 10) : null };
+  const info = { name, parsed, sequences: added ? parseInt(added[1], 10) : null };
   builtDbs.set(key, info);
   return info;
 }
@@ -119,7 +132,7 @@ async function ensureBlastDb(source, dbType, onProgress) {
 export async function runBlast(program, queryFasta, sources, maxHits, onProgress) {
   // Biowasm exposes each BLAST binary as a separate program (there is no
   // monolithic `blast.js`), so request the chosen program plus makeblastdb.
-  await initTools([`blast/${program}/2.17.0`, 'blast/makeblastdb/2.17.0']);
+  await initTools([`blast/${program}/2.17.0`, 'blast/makeblastdb/2.17.0', 'blast/blastdbcmd/2.17.0']);
   const isNucleotide = program === 'blastn';
   const dbType = isNucleotide ? 'nucl' : 'prot';
   const dbs = [];
@@ -138,12 +151,56 @@ export async function runBlast(program, queryFasta, sources, maxHits, onProgress
   const result = await cli.exec(program, [
     '-query', 'query.fa', '-db', dbs.map(d => d.name).join(' '), ...filter,
     '-evalue', '1000', '-max_target_seqs', String(maxHits),
-    '-outfmt', '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore sseq',
+    '-outfmt', '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore sseq sacc slen',
   ]);
   const text = execText(result);
   if (!text.trim()) throw new Error(`${program} produced no hits — try a different query/database`);
   const known = dbs.every(d => d.sequences != null);
-  return { text, sequences: known ? dbs.reduce((n, d) => n + d.sequences, 0) : null };
+  onProgress?.('Retrieving full-length subject sequences…');
+  const full = await fetchFullSubjects(text, dbs, sources);
+  return { text, full, sequences: known ? dbs.reduce((n, d) => n + d.sequences, 0) : null };
+}
+
+/** Full-length sequences for every subject in a BLAST tabular result, keyed
+ *  by accession (and sseqid). Uses blastdbcmd on the ID-indexed databases;
+ *  inline sources that could not be indexed are looked up from their text. */
+async function fetchFullSubjects(tabular, dbs, sources) {
+  const full = new Map();
+  const ids = new Set();
+  for (const line of tabular.split('\n')) {
+    const f = line.split('\t');
+    if (f.length >= 14 && f[13]) ids.add(f[13]);
+  }
+  if (!ids.size) return full;
+  const parsedDbs = dbs.filter(d => d.parsed).map(d => d.name);
+  if (parsedDbs.length) {
+    await cli.mount([{ name: 'subject_ids.txt', data: [...ids].join('\n') + '\n' }]);
+    // %a = accession, %s = sequence. IDs absent from one of the databases
+    // are reported on stderr and skipped, which is expected with several.
+    const out = execText(await cli.exec('blastdbcmd', [
+      '-db', parsedDbs.join(' '), '-entry_batch', 'subject_ids.txt', '-outfmt', '%a\t%s']));
+    for (const line of out.split('\n')) {
+      const tab = line.indexOf('\t');
+      if (tab < 1) continue;
+      const acc = line.slice(0, tab).trim();
+      const seq = line.slice(tab + 1).trim();
+      if (!/^[A-Za-z*-]+$/.test(seq)) continue;
+      // Key by accession both with and without a version suffix (X.1 / X).
+      for (const k of [acc, acc.replace(/\.\d+$/, '')]) if (!full.has(k)) full.set(k, seq);
+    }
+  }
+  // Inline (uploaded/pasted) sources that failed ID indexing: scan their text.
+  for (const [i, d] of dbs.entries()) {
+    if (d.parsed || !sources[i]?.data) continue;
+    let name = null, seq = [];
+    const flush = () => { if (name && !full.has(name)) full.set(name, seq.join('')); };
+    for (const line of sources[i].data.split(/\r?\n/)) {
+      if (line.startsWith('>')) { flush(); name = line.slice(1).trim().split(/\s+/)[0]; seq = []; }
+      else if (name) seq.push(line.trim());
+    }
+    flush();
+  }
+  return full;
 }
 
 /** Run local phmmer against a user-provided FASTA database.
@@ -182,6 +239,8 @@ export function parseBlastHits(tabular) {
       seq: (f[12] || '').replace(/[-.]/g, ''),
       sstart: parseInt(f[8], 10),
       send: parseInt(f[9], 10),
+      acc: f[13] || null,
+      slen: f[14] ? parseInt(f[14], 10) : null,
     });
   }
   return hits;

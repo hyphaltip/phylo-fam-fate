@@ -219,3 +219,4 @@ footer a { color: var(--primary); }
 .hit-table tr.hsp-row td:nth-child(2) { padding-left: 1.4rem; }
 .hsp-toggle { margin-left: 0.4rem; padding: 0.05rem 0.4rem; font: inherit; font-size: 0.7rem; border: 1px solid var(--border); border-radius: 999px; background: #eef2ff; color: #3730a3; cursor: pointer; }
 .hsp-toggle:hover { background: #e0e7ff; }
+.hsp-only { margin-left: 0.3rem; padding: 0 0.35rem; border-radius: 999px; font-size: 0.68rem; background: #fef3c7; color: #92400e; }

@@ -184,11 +184,12 @@
         </div>
         <div id="hit-results" class="hidden">
           <table class="hit-table">
-            <thead><tr><th>Keep</th><th>Subject</th><th>Query</th><th>E-value</th><th>Score</th><th>%ID</th><th>Len</th><th>Subject range</th></tr></thead>
+            <thead><tr><th>Keep</th><th>Subject</th><th>Query</th><th>E-value</th><th>Score</th><th>%ID</th><th>Len</th><th>Subject range / length</th></tr></thead>
             <tbody id="hit-table-body"></tbody>
           </table>
           <div class="row hit-footer">
             <label class="checkbox inline"><input type="checkbox" id="hit-include-query" checked> Include query sequence(s)</label>
+            <label class="checkbox inline" title="Align the whole subject protein (retrieved with blastdbcmd) instead of only the region BLAST aligned"><input type="checkbox" id="hit-full-length" checked> Full-length sequences</label>
             <span class="hint" id="hit-summary"></span>
             <button class="btn primary small" id="hit-use-selected" type="button">Use selected for alignment →</button>
           </div>
