@@ -21,14 +21,20 @@ echo "$SHA256  $tmp/kalign.tar.gz" | sha256sum -c - >/dev/null || { echo "checks
 tar xzf "$tmp/kalign.tar.gz" -C "$tmp"
 cd "$tmp/kalign-$VERSION"
 ./autogen.sh >/dev/null 2>&1 || autoreconf -fi
-# Pretend the OS lacks AVX support (disables -mavx/-mavx2/-mavx512* and
-# HAVE_AVX*), and skip SHA/AES, which older x86-64 CPUs also lack.
+# Pretend the OS lacks AVX support (disables -mavx/-mavx2/-mavx512*/FMA and
+# HAVE_AVX*), and skip SHA/AES and AMD-only SSE4a, which not every x86-64 CPU
+# has. The result is the same instruction set whichever runner builds it:
+# MMX + SSE … SSE4.2.
 # --without-openmp: no libgomp runtime dependency (the browser's Kalign is
 # single-threaded too), so the binary runs in any image.
 ./configure --prefix="$tmp/install" --without-openmp \
   ax_cv_have_avx_os_support_ext=no ax_cv_have_avx512_os_support_ext=no \
-  ax_cv_have_sha_cpu_ext=no ax_cv_have_aes_cpu_ext=no >/dev/null
-grep -E '^SIMD_FLAGS' Makefile | head -n1
+  ax_cv_have_sha_cpu_ext=no ax_cv_have_aes_cpu_ext=no ax_cv_have_sse4a_cpu_ext=no >/dev/null
+flags=$(grep -E '^SIMD_FLAGS' Makefile | head -n1); echo "$flags"
+# Guard: nothing beyond SSE4.2 may slip in, whatever CPU this build runs on
+if echo "$flags" | grep -qE -- '-m(avx|fma|sha|aes|sse4a|xop|bmi|f16c)'; then
+  echo "non-portable SIMD flags enabled: $flags" >&2; exit 1
+fi
 make -j"$(nproc 2>/dev/null || echo 2)" >/dev/null
 make install >/dev/null
 mkdir -p "$PREFIX/bin"
