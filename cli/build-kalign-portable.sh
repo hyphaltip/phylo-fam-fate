@@ -21,12 +21,21 @@ echo "$SHA256  $tmp/kalign.tar.gz" | sha256sum -c - >/dev/null || { echo "checks
 tar xzf "$tmp/kalign.tar.gz" -C "$tmp"
 cd "$tmp/kalign-$VERSION"
 ./autogen.sh >/dev/null 2>&1 || autoreconf -fi
-# Pretend the OS lacks AVX support: disables -mavx/-mavx2/-mavx512* and HAVE_AVX*.
-./configure --prefix="$tmp/install" ax_cv_have_avx_os_support_ext=no ax_cv_have_avx512_os_support_ext=no >/dev/null
+# Pretend the OS lacks AVX support (disables -mavx/-mavx2/-mavx512* and
+# HAVE_AVX*), and skip SHA/AES, which older x86-64 CPUs also lack.
+# --without-openmp: no libgomp runtime dependency (the browser's Kalign is
+# single-threaded too), so the binary runs in any image.
+./configure --prefix="$tmp/install" --without-openmp \
+  ax_cv_have_avx_os_support_ext=no ax_cv_have_avx512_os_support_ext=no \
+  ax_cv_have_sha_cpu_ext=no ax_cv_have_aes_cpu_ext=no >/dev/null
 grep -E '^SIMD_FLAGS' Makefile | head -n1
 make -j"$(nproc 2>/dev/null || echo 2)" >/dev/null
 make install >/dev/null
 mkdir -p "$PREFIX/bin"
 install -m 0755 "$tmp/install/bin/kalign" "$PREFIX/bin/kalign"
-"$PREFIX/bin/kalign" --version 2>&1 | grep -m1 -i 'kalign' || true
-echo "installed $PREFIX/bin/kalign ($VERSION, portable SIMD)"
+# Fail loudly if the binary can't run (missing library, bad instructions)
+# (judge by the output: some versions exit non-zero even for --version)
+ver=$("$PREFIX/bin/kalign" --version 2>&1 || true)
+echo "$ver" | grep -q "$VERSION" || { echo "built kalign does not run or reports an unexpected version: $ver" >&2; exit 1; }
+if command -v ldd >/dev/null; then echo "kalign links: $(ldd "$PREFIX/bin/kalign" | awk '{print $1}' | tr '\n' ' ')"; fi
+echo "installed $PREFIX/bin/kalign ($VERSION, portable SIMD, no OpenMP)"

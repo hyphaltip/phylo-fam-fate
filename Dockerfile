@@ -37,6 +37,9 @@ COPY --from=build /out/bin/FastTree-browser /usr/local/bin/FastTree-browser
 # Replace conda's kalign (3.3.2, host-tuned SIMD) with the portable 3.3.1 build
 COPY --from=build /out/bin/kalign /opt/conda/bin/kalign
 USER root
+# The source-built tools must run in *this* image (catches missing libraries)
+RUN (/opt/conda/bin/kalign --version 2>&1 || true) | grep 3.3.1 \
+ && (/usr/local/bin/FastTree-browser -expert 2>&1 || true) | grep -m1 'FastTree 2.1.11'
 RUN chmod -R a+rX /opt/phylo-fam-fate \
  && chmod a+x /opt/phylo-fam-fate/cli/famfate.sh /opt/phylo-fam-fate/cli/famfate-js.mjs \
  && ln -s /opt/phylo-fam-fate/cli/famfate-js.mjs /usr/local/bin/famfate-js \
